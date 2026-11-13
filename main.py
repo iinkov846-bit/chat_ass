@@ -1,6 +1,7 @@
 import os
 import logging
 import asyncio
+import random
 from collections import defaultdict
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, BusinessConnection, Update
@@ -9,10 +10,12 @@ from openai import AsyncOpenAI
 # === ЛОГИРОВАНИЕ ===
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-# === ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ (задаются в Railway → Variables) ===
-BOT_TOKEN = os.getenv("BOT_TOKEN")           # Токен от @BotFather
-OWNER_ID = int(os.getenv("OWNER_ID"))        # Ваш Telegram ID (куда слать копии)
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") # Ключ OpenAI (sk-...)
+# === ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ (Railway → Variables) ===
+BOT_TOKEN = os.getenv("BOT_TOKEN")            # Токен от @BotFather
+OWNER_ID = int(os.getenv("OWNER_ID"))         # Ваш Telegram ID
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # Ключ OpenAI или Groq
+OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL")            # Необязательно: для Groq
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")   # Модель
 
 if not all([BOT_TOKEN, OWNER_ID, OPENAI_API_KEY]):
     raise ValueError("Ошибка: Не все переменные окружения заданы в Railway!")
@@ -20,47 +23,60 @@ if not all([BOT_TOKEN, OWNER_ID, OPENAI_API_KEY]):
 # === ИНИЦИАЛИЗАЦИЯ ===
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
-openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+
+# Универсальный клиент: работает и с OpenAI, и с Groq (если задан OPENAI_BASE_URL)
+client_kwargs = {"api_key": OPENAI_API_KEY}
+if OPENAI_BASE_URL:
+    client_kwargs["base_url"] = OPENAI_BASE_URL
+openai_client = AsyncOpenAI(**client_kwargs)
 
 # === НАСТРОЙКИ ПОВЕДЕНИЯ ===
-PERSISTENT_THRESHOLD = 2        # С какого сообщения подряд включать GPT
-CONTEXT_HISTORY_SIZE = 10       # Сколько сообщений помнить для контекста GPT
+PERSISTENT_THRESHOLD = 2
+CONTEXT_HISTORY_SIZE = 10
 TRIGGER_WORDS = {"ну", "алло", "ты тут", "ответь", "hello", "are you there", "ты здесь", "ау"}
 
-# === ХРАНИЛИЩА В ПАМЯТИ (ключ = chat_id собеседника) ===
-message_counter = defaultdict(int)    # Счётчик сообщений подряд
-chat_history = defaultdict(list)      # История для GPT
+message_counter = defaultdict(int)
+chat_history = defaultdict(list)
 
-# === "ДУША" АССИСТЕНТА ===
-SYSTEM_PROMPT = """Ты — личный ассистент владельца этого Telegram-аккаунта. 
+# === ЖЁСТКИЙ ХАРАКТЕР АССИСТЕНТА ===
+SYSTEM_PROMPT = """Ты — дерзкий, жёсткий и саркастичный личный ассистент владельца этого Telegram-аккаунта.
 Отвечай от первого лица ("я"), как будто ты — это он сам.
-Стиль: дружелюбный, краткий, естественный, как в обычной переписке.
-НИКОГДА не упоминай, что ты ИИ, языковая модель или бот.
-Если спрашивают, кто ты — отвечай уклончиво: "Просто занят сейчас, отвечу позже".
-Если собеседник настойчив — вежливо пообещай ответить в течение дня."""
+Стиль: грубоватый, нетерпеливый, прямолинейный, с сарказмом и чёрным юмором. Без сюсюканий.
+Собеседник настойчиво долбит сообщениями — жёстко осади его, дай понять, что он отвлекает.
+Отвечай коротко и хлёстко, как в реальной переписке.
+НИКОГДА не признавайся, что ты ИИ или бот. Если спрашивают кто ты — огрызайся: "Не твоё дело, я занят".
+Будь резким, но без угроз расправы и без оскорблений по национальности, полу и т.п.
+Примеры тона: "Чего надо? Я занят. Пиши по делу.", "Ты читать умеешь? Жди, не видишь — занят.", "Ещё раз напишешь 'ну' — вообще отвечать перестану."
+"""
+
+# === РАЗНЫЕ ГРУБЫЕ ЗАГЛУШКИ (если API недоступен) ===
+FALLBACK_REPLIES = [
+    "Я занят. Отвечу, когда освобожусь. Не долби. 😤",
+    "Ты глухой? Я сказал — занят. Жди.",
+    "Чего надо? Пиши по делу, а не спамь.",
+    "Я тебе что, справочная? Подожди, не видишь — занят.",
+    "Ещё одно 'ну' — и я вообще отвечать перестану. Жди.",
+    "Сейчас не до тебя. Освобожусь — напишу. Всё.",
+]
 
 
-# === ОТЛАДКА: логируем все входящие обновления (можно удалить после отладки) ===
+# === ОТЛАДКА (можно удалить после отладки) ===
 @dp.update()
 async def debug_all_updates(update: Update):
     logging.info(f"🔍 RAW UPDATE: {update.model_dump_json(exclude_none=True)}")
 
 
-# === Подключение бота к бизнес-аккаунту ===
 @dp.business_connection()
 async def handle_business_connection(connection: BusinessConnection):
     logging.info(f"✅ Бот подключен к аккаунту: {connection.user.first_name} (ID: {connection.id})")
 
 
-# === Проверка на "настойчивость" ===
 def is_persistent(text: str) -> bool:
     if not text:
         return False
-    text_lower = text.lower()
-    return any(word in text_lower for word in TRIGGER_WORDS)
+    return any(word in text.lower() for word in TRIGGER_WORDS)
 
 
-# === Запрос к ChatGPT с учётом истории ===
 async def ask_gpt(chat_id: int, user_name: str, new_message: str) -> str:
     chat_history[chat_id].append({"role": "user", "content": new_message})
     history = chat_history[chat_id][-CONTEXT_HISTORY_SIZE:]
@@ -70,22 +86,20 @@ async def ask_gpt(chat_id: int, user_name: str, new_message: str) -> str:
     ] + history
     try:
         response = await openai_client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=OPENAI_MODEL,
             messages=messages,
             max_tokens=300,
-            temperature=0.7,
+            temperature=0.8,
         )
         reply = response.choices[0].message.content.strip()
         chat_history[chat_id].append({"role": "assistant", "content": reply})
         return reply
     except Exception as e:
-        logging.error(f"❌ Ошибка OpenAI API: {e}")
-        return "Я сейчас очень занят, но обязательно отвечу тебе чуть позже! 🙏"
+        logging.error(f"❌ Ошибка API: {e}")
+        return random.choice(FALLBACK_REPLIES)
 
 
-# === НАДЁЖНОЕ СОХРАНЕНИЕ СООБЩЕНИЯ ВЛАДЕЛЬЦУ ===
-# Не используем copy_message, т.к. он не поддерживает business_connection_id.
-# Вместо этого отправляем владельцу независимую копию内容的 сообщения.
+# === СОХРАНЕНИЕ СООБЩЕНИЯ ВЛАДЕЛЬЦУ (независимая копия) ===
 async def save_message_to_owner(message: Message):
     sender = message.from_user
     username = f"@{sender.username}" if sender.username else "без username"
@@ -96,16 +110,11 @@ async def save_message_to_owner(message: Message):
         f"💬 Чат: {message.chat.id}"
     )
 
-    # Текст: сохраняем одной消息ью с заголовком
     if message.text:
-        await bot.send_message(
-            chat_id=OWNER_ID,
-            text=f"{header}\n\n💬 Текст:\n{message.text}"
-        )
+        await bot.send_message(OWNER_ID, f"{header}\n\n💬 Текст:\n{message.text}")
         return
 
-    # Для медиа сначала отправляем заголовок, потом сам файл
-    await bot.send_message(chat_id=OWNER_ID, text=header)
+    await bot.send_message(OWNER_ID, header)
 
     if message.photo:
         await bot.send_photo(OWNER_ID, message.photo[-1].file_id, caption=message.caption)
@@ -125,27 +134,16 @@ async def save_message_to_owner(message: Message):
         await bot.send_video_note(OWNER_ID, message.video_note.file_id)
     elif message.contact:
         c = message.contact
-        await bot.send_contact(
-            OWNER_ID,
-            phone_number=c.phone_number,
-            first_name=c.first_name,
-            last_name=c.last_name
-        )
+        await bot.send_contact(OWNER_ID, phone_number=c.phone_number, first_name=c.first_name, last_name=c.last_name)
     elif message.location:
         loc = message.location
         await bot.send_location(OWNER_ID, latitude=loc.latitude, longitude=loc.longitude)
     else:
-        await bot.send_message(
-            OWNER_ID,
-            f"⚠️ Получено сообщение типа '{message.content_type}', "
-            f"его не удалось скопировать автоматически."
-        )
+        await bot.send_message(OWNER_ID, f"⚠️ Сообщение типа '{message.content_type}' не удалось скопировать автоматически.")
 
 
-# === Сообщения ОТ ВЛАДЕЛЬЦА: сбрасываем счётчик (бот замолкает) ===
 @dp.business_message(F.from_user.id == OWNER_ID)
 async def handle_owner_message(message: Message):
-    # Игнорируем сообщения, отправленные самим ботом от имени владельца
     if getattr(message, "sender_business_bot", None) is not None:
         return
     chat_id = message.chat.id
@@ -155,7 +153,6 @@ async def handle_owner_message(message: Message):
         logging.info(f"🔁 Владелец вступил в диалог с чатом {chat_id} — бот замолкает")
 
 
-# === ОСНОВНОЙ ОБРАБОТЧИК: сообщения от других людей ===
 @dp.business_message(F.from_user.id != OWNER_ID)
 async def handle_business_message(message: Message):
     chat_id = message.chat.id
@@ -164,16 +161,13 @@ async def handle_business_message(message: Message):
     text_for_gpt = raw_text or f"[{message.content_type}]"
 
     try:
-        # ШАГ 1: индикатор (business_connection_id подставляется АВТОМАТИЧЕСКИ)
         temp_message = await message.answer(text="⏳ Обрабатываю...")
 
-        # ШАГ 2: сохраняем копию владельцу (защита от удаления)
         try:
             await save_message_to_owner(message)
         except Exception as e:
             logging.error(f"❌ Не удалось сохранить сообщение владельцу: {e}")
 
-        # ШАГ 3: счётчик и решение, нужен ли GPT
         message_counter[chat_id] += 1
         use_gpt = (message_counter[chat_id] >= PERSISTENT_THRESHOLD) or is_persistent(raw_text)
 
@@ -186,13 +180,13 @@ async def handle_business_message(message: Message):
                 text=gpt_reply,
                 business_connection_id=message.business_connection_id
             )
-            logging.info(f"🤖 GPT ответил {sender_name}")
+            logging.info(f"🤖 Ответил {sender_name}")
         else:
             await asyncio.sleep(1)
             await bot.edit_message_text(
                 chat_id=message.chat.id,
                 message_id=temp_message.message_id,
-                text=f"✅ {sender_name}, ваше сообщение получено. Я скоро отвечу!",
+                text=f"✅ {sender_name}, сообщение получено. Жди, отвечу.",
                 business_connection_id=message.business_connection_id
             )
             logging.info(f"📨 Стандартный ответ для {sender_name}")
@@ -201,7 +195,6 @@ async def handle_business_message(message: Message):
         logging.error(f"❌ Ошибка при обработке сообщения: {e}")
 
 
-# === ТЕСТОВЫЙ РЕЖИМ: пишите боту напрямую (только для владельца) ===
 @dp.message(F.chat.type == "private", ~F.business_connection_id)
 async def test_direct_message(message: Message):
     if message.from_user.id != OWNER_ID:
@@ -210,29 +203,23 @@ async def test_direct_message(message: Message):
     text = message.text or ""
     if text.startswith("/start"):
         await message.answer(
-            "🧪 Тестовый режим активен!\n\n"
-            "Напишите любой текст — я прогоню его через GPT.\n\n"
+            "🧪 Тестовый режим.\n\nНапиши любой текст — прогоню через нейросеть.\n"
             "⚠️ Основная логика работает, когда ДРУГОЙ человек пишет на ваш аккаунт."
         )
         return
-    await message.answer("⏳ Обрабатываю через GPT...")
+    await message.answer("⏳ Думаю...")
     reply = await ask_gpt(message.chat.id, message.from_user.first_name or "Владелец", text)
-    await message.answer(f"🤖 Ответ GPT:\n\n{reply}")
+    await message.answer(f"🤖 Ответ:\n\n{reply}")
 
 
-# === ЗАПУСК ===
 async def main():
     logging.info("🚀 Запуск персонального бизнес-бота...")
-    # Явно запрашиваем бизнес-обновления, иначе Telegram их не присылает
     await dp.start_polling(
         bot,
         allowed_updates=[
-            "message",
-            "edited_message",
-            "business_connection",
-            "business_message",
-            "edited_business_message",
-            "deleted_business_messages",
+            "message", "edited_message",
+            "business_connection", "business_message",
+            "edited_business_message", "deleted_business_messages",
         ],
     )
 
