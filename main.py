@@ -133,7 +133,7 @@ async def handle_business_message(message: Message):
                 text=gpt_reply,
                 business_connection_id=message.business_connection_id
             )
-            logging.info(f"🤖 GPT ответил {sender_name}: {gpt_reply[:50]}...")
+            logging.info(f"🤖 GPТ ответил {sender_name}: {gpt_reply[:50]}...")
         else:
             await asyncio.sleep(1)
             await bot.edit_message_text(
