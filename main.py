@@ -6,28 +6,32 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, BusinessConnection, Update
 from openai import AsyncOpenAI
 
+# === ЛОГИРОВАНИЕ ===
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-# === ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ ===
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-OWNER_ID = int(os.getenv("OWNER_ID"))
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+# === ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ (задаются в Railway → Variables) ===
+BOT_TOKEN = os.getenv("BOT_TOKEN")          # Токен от @BotFather
+OWNER_ID = int(os.getenv("OWNER_ID"))       # Ваш Telegram ID (куда слать копии)
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")# Ключ OpenAI (sk-...)
 
 if not all([BOT_TOKEN, OWNER_ID, OPENAI_API_KEY]):
     raise ValueError("Ошибка: Не все переменные окружения заданы в Railway!")
 
+# === ИНИЦИАЛИЗАЦИЯ ===
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
-# === НАСТРОЙКИ ===
-PERSISTENT_THRESHOLD = 2
-CONTEXT_HISTORY_SIZE = 10
+# === НАСТРОЙКИ ПОВЕДЕНИЯ ===
+PERSISTENT_THRESHOLD = 2        # С какого сообщения подряд включать GPT
+CONTEXT_HISTORY_SIZE = 10       # Сколько сообщений помнить для контекста GPT
 TRIGGER_WORDS = {"ну", "алло", "ты тут", "ответь", "hello", "are you there", "ты здесь", "ау"}
 
-message_counter = defaultdict(int)
-chat_history = defaultdict(list)
+# === ХРАНИЛИЩА В ПАМЯТИ (ключ = chat_id собеседника) ===
+message_counter = defaultdict(int)    # Счётчик сообщений подряд
+chat_history = defaultdict(list)      # История для GPT
 
+# === "ДУША" АССИСТЕНТА ===
 SYSTEM_PROMPT = """Ты — личный ассистент владельца этого Telegram-аккаунта. 
 Отвечай от первого лица ("я"), как будто ты — это он сам.
 Стиль: дружелюбный, краткий, естественный, как в обычной переписке.
@@ -36,18 +40,19 @@ SYSTEM_PROMPT = """Ты — личный ассистент владельца �
 Если собеседник настойчив — вежливо пообещай ответить в течение дня."""
 
 
-# === ОТЛАДКА: логируем ВСЕ входящие обновления ===
+# === ОТЛАДКА: логируем все входящие обновления (можно удалить после отладки) ===
 @dp.update()
 async def debug_all_updates(update: Update):
     logging.info(f"🔍 RAW UPDATE: {update.model_dump_json(exclude_none=True)}")
 
 
-# === Подключение бота к аккаунту ===
+# === Подключение бота к бизнес-аккаунту ===
 @dp.business_connection()
 async def handle_business_connection(connection: BusinessConnection):
     logging.info(f"✅ Бот подключен к аккаунту: {connection.user.first_name} (ID: {connection.id})")
 
 
+# === Проверка на "настойчивость" ===
 def is_persistent(text: str) -> bool:
     if not text:
         return False
@@ -55,6 +60,7 @@ def is_persistent(text: str) -> bool:
     return any(word in text_lower for word in TRIGGER_WORDS)
 
 
+# === Запрос к ChatGPT с учётом истории ===
 async def ask_gpt(chat_id: int, user_name: str, new_message: str) -> str:
     chat_history[chat_id].append({"role": "user", "content": new_message})
     history = chat_history[chat_id][-CONTEXT_HISTORY_SIZE:]
@@ -77,9 +83,12 @@ async def ask_gpt(chat_id: int, user_name: str, new_message: str) -> str:
         return "Я сейчас очень занят, но обязательно отвечу тебе чуть позже! 🙏"
 
 
-# === Сообщения ОТ ВЛАДЕЛЬЦА (сброс счётчика) ===
+# === Сообщения ОТ ВЛАДЕЛЬЦА: сбрасываем счётчик (бот замолкает) ===
 @dp.business_message(F.from_user.id == OWNER_ID)
 async def handle_owner_message(message: Message):
+    # Игнорируем сообщения, отправленные самим ботом от имени владельца
+    if getattr(message, "sender_business_bot", None) is not None:
+        return
     chat_id = message.chat.id
     if chat_id in message_counter:
         message_counter[chat_id] = 0
@@ -95,13 +104,10 @@ async def handle_business_message(message: Message):
     text = message.text or ""
 
     try:
-        # ШАГ 1: индикатор
-        temp_message = await message.answer(
-            text="⏳ Обрабатываю...",
-            business_connection_id=message.business_connection_id
-        )
+        # ШАГ 1: индикатор (business_connection_id подставляется АВТОМАТИЧЕСКИ)
+        temp_message = await message.answer(text="⏳ Обрабатываю...")
 
-        # ШАГ 2: копия владельцу (защита от удаления)
+        # ШАГ 2: копия владельцу (защита от удаления) — параметр нужен явно
         await bot.copy_message(
             chat_id=OWNER_ID,
             from_chat_id=message.chat.id,
@@ -109,7 +115,7 @@ async def handle_business_message(message: Message):
             business_connection_id=message.business_connection_id
         )
 
-        # ШАГ 3: счётчик
+        # ШАГ 3: счётчик и решение, нужен ли GPT
         message_counter[chat_id] += 1
         use_gpt = (message_counter[chat_id] >= PERSISTENT_THRESHOLD) or is_persistent(text)
 
@@ -137,7 +143,7 @@ async def handle_business_message(message: Message):
         logging.error(f"❌ Ошибка при обработке сообщения: {e}")
 
 
-# === ТЕСТОВЫЙ РЕЖИМ: пишите боту напрямую ===
+# === ТЕСТОВЫЙ РЕЖИМ: пишите боту напрямую (только для владельца) ===
 @dp.message(F.chat.type == "private", ~F.business_connection_id)
 async def test_direct_message(message: Message):
     if message.from_user.id != OWNER_ID:
@@ -156,9 +162,10 @@ async def test_direct_message(message: Message):
     await message.answer(f"🤖 Ответ GPT:\n\n{reply}")
 
 
+# === ЗАПУСК ===
 async def main():
     logging.info("🚀 Запуск персонального бизнес-бота...")
-    # КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: явно запрашиваем бизнес-обновления
+    # Явно запрашиваем бизнес-обновления, иначе Telegram их не присылает
     await dp.start_polling(
         bot,
         allowed_updates=[
