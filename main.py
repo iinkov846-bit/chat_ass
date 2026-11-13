@@ -11,24 +11,23 @@ from openai import AsyncOpenAI
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 # === ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ (Railway → Variables) ===
-BOT_TOKEN = os.getenv("BOT_TOKEN")            # Токен от @BotFather
-OWNER_ID = int(os.getenv("OWNER_ID"))         # Ваш Telegram ID
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # Ключ OpenAI или Groq
-OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL")            # Необязательно: для Groq
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")   # Модель
+BOT_TOKEN = os.getenv("BOT_TOKEN")             # Токен от @BotFather
+OWNER_ID = int(os.getenv("OWNER_ID"))          # Ваш Telegram ID (куда слать копии)
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")   # Универсальный слот: ключ Qwen / Groq / OpenRouter
+
+# Qwen по умолчанию — официальный международный эндпоинт Alibaba Model Studio.
+# ВАЖНО: если консоль показала другой API Host — вставь его в OPENAI_BASE_URL.
+OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "qwen-plus")
+DEBUG = os.getenv("DEBUG", "1") == "1"         # 1 = логировать сырые обновления, 0 = тишина
 
 if not all([BOT_TOKEN, OWNER_ID, OPENAI_API_KEY]):
-    raise ValueError("Ошибка: Не все переменные окружения заданы в Railway!")
+    raise ValueError("Ошибка: задай BOT_TOKEN, OWNER_ID и OPENAI_API_KEY в Railway!")
 
 # === ИНИЦИАЛИЗАЦИЯ ===
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
-
-# Универсальный клиент: работает и с OpenAI, и с Groq (если задан OPENAI_BASE_URL)
-client_kwargs = {"api_key": OPENAI_API_KEY}
-if OPENAI_BASE_URL:
-    client_kwargs["base_url"] = OPENAI_BASE_URL
-openai_client = AsyncOpenAI(**client_kwargs)
+openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL)
 
 # === НАСТРОЙКИ ПОВЕДЕНИЯ ===
 PERSISTENT_THRESHOLD = 2
@@ -49,7 +48,7 @@ SYSTEM_PROMPT = """Ты — дерзкий, жёсткий и саркастич
 Примеры тона: "Чего надо? Я занят. Пиши по делу.", "Ты читать умеешь? Жди, не видишь — занят.", "Ещё раз напишешь 'ну' — вообще отвечать перестану."
 """
 
-# === РАЗНЫЕ ГРУБЫЕ ЗАГЛУШКИ (если API недоступен) ===
+# === РАЗНЫЕ ГРУБЫЕ ЗАГЛУШКИ (если API недоступен / лимит) ===
 FALLBACK_REPLIES = [
     "Я занят. Отвечу, когда освобожусь. Не долби. 😤",
     "Ты глухой? Я сказал — занят. Жди.",
@@ -60,10 +59,11 @@ FALLBACK_REPLIES = [
 ]
 
 
-# === ОТЛАДКА (можно удалить после отладки) ===
+# === ОТЛАДКА (можно отключить переменной DEBUG=0) ===
 @dp.update()
 async def debug_all_updates(update: Update):
-    logging.info(f"🔍 RAW UPDATE: {update.model_dump_json(exclude_none=True)}")
+    if DEBUG:
+        logging.info(f"🔍 RAW UPDATE: {update.model_dump_json(exclude_none=True)}")
 
 
 @dp.business_connection()
@@ -99,7 +99,7 @@ async def ask_gpt(chat_id: int, user_name: str, new_message: str) -> str:
         return random.choice(FALLBACK_REPLIES)
 
 
-# === СОХРАНЕНИЕ СООБЩЕНИЯ ВЛАДЕЛЬЦУ (независимая копия) ===
+# === СОХРАНЕНИЕ СООБЩЕНИЯ ВЛАДЕЛЬЦУ (независимая копия, не удалится) ===
 async def save_message_to_owner(message: Message):
     sender = message.from_user
     username = f"@{sender.username}" if sender.username else "без username"
@@ -173,11 +173,11 @@ async def handle_business_message(message: Message):
 
         if use_gpt:
             await asyncio.sleep(1.5)
-            gpt_reply = await ask_gpt(chat_id, sender_name, text_for_gpt)
+            reply = await ask_gpt(chat_id, sender_name, text_for_gpt)
             await bot.edit_message_text(
                 chat_id=message.chat.id,
                 message_id=temp_message.message_id,
-                text=gpt_reply,
+                text=reply,
                 business_connection_id=message.business_connection_id
             )
             logging.info(f"🤖 Ответил {sender_name}")
@@ -203,7 +203,7 @@ async def test_direct_message(message: Message):
     text = message.text or ""
     if text.startswith("/start"):
         await message.answer(
-            "🧪 Тестовый режим.\n\nНапиши любой текст — прогоню через нейросеть.\n"
+            "🧪 Тестовый режим.\n\nНапиши любой текст — прогоню через Qwen.\n"
             "⚠️ Основная логика работает, когда ДРУГОЙ человек пишет на ваш аккаунт."
         )
         return
@@ -214,6 +214,7 @@ async def test_direct_message(message: Message):
 
 async def main():
     logging.info("🚀 Запуск персонального бизнес-бота...")
+    logging.info(f"🧠 Модель: {OPENAI_MODEL} | Эндпоинт: {OPENAI_BASE_URL}")
     await dp.start_polling(
         bot,
         allowed_updates=[
