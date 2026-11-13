@@ -1,35 +1,26 @@
 import os
 import re
 import html
-import logging
 import asyncio
+import logging
 
-from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message
-
+from telethon import TelegramClient, events
+from telethon.tl.types import Channel, Chat, User
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-OWNER_ID_RAW = os.getenv("OWNER_ID")
+# === ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ ===
+API_ID = int(os.getenv("API_ID"))
+API_HASH = os.getenv("API_HASH")
+OWNER_ID = int(os.getenv("OWNER_ID"))  # твой Telegram user ID (число)
+SESSION_NAME = os.getenv("SESSION_NAME", "userbot")
 
-if not BOT_TOKEN or not OWNER_ID_RAW:
-    raise ValueError("Задай BOT_TOKEN и OWNER_ID в Railway Variables!")
+if not all([API_ID, API_HASH, OWNER_ID]):
+    raise ValueError("Задай API_ID, API_HASH и OWNER_ID в Railway Variables!")
 
-OWNER_ID = int(OWNER_ID_RAW)
-
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
-
-
-# ============================================================
 # === НАСТРОЙКИ ===
-# ============================================================
+VZLOM_DELAY = 5
 
-VZLOM_DELAY = 5  # пауза между этапами /взлом
-
-# === СООБЩЕНИЯ ДЛЯ /troll (добавь свои фразы сюда) ===
-# Бот сам подставит "@username, " в начало каждой строки.
 TROLL_MESSAGES = [
     "я те мать ебал, ха",
     "ты же жирная свинья нахуй",
@@ -59,255 +50,191 @@ TROLL_MESSAGES = [
 MIN_TROLL_DELAY = 3
 MAX_TROLL_DELAY = 60
 MAX_TROLL_MESSAGES = 20
+TROLL_DELETE_AFTER = 5
 
-TROLL_DELETE_AFTER = 5  # через сколько секунд удалять сообщения троллинга
-
+# Активные задачи троллинга: chat_id -> asyncio.Task
 troll_tasks: dict[int, asyncio.Task] = {}
 delete_tasks: set[asyncio.Task] = set()
+
+# Клиент Telethon
+client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
 
 
 # ============================================================
 # === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===
 # ============================================================
 
-def command_filter(*names: str):
-    lowered = {f"/{n.lower()}" for n in names}
-
-    def checker(message: Message) -> bool:
-        text = message.text or message.caption or ""
-        if not text:
-            return False
-        first = text.split()[0].lower().split("@")[0]
-        return first in lowered
-
-    return checker
-
-
-async def send_text(chat_id, text, business_connection_id=None, parse_mode=None) -> Message:
-    """Отправляет сообщение. В бизнес-чате подставляет business_connection_id."""
-    kwargs = {}
-    if business_connection_id:
-        kwargs["business_connection_id"] = business_connection_id
-    if parse_mode:
-        kwargs["parse_mode"] = parse_mode
-    return await bot.send_message(chat_id=chat_id, text=text, **kwargs)
-
-
-async def edit_text(chat_id, message_id, text, business_connection_id=None, parse_mode=None):
-    kwargs = {}
-    if business_connection_id:
-        kwargs["business_connection_id"] = business_connection_id
-    if parse_mode:
-        kwargs["parse_mode"] = parse_mode
-    await bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, **kwargs)
-
-
-async def delete_later(chat_id: int, message_id: int, business_connection_id: str | None, delay: float):
+async def schedule_delete(chat_id: int, message_id: int, delay: float):
     """Удаляет сообщение через delay секунд."""
-    try:
-        await asyncio.sleep(delay)
+    async def _delete():
+        try:
+            await asyncio.sleep(delay)
+            await client.delete_messages(chat_id, [message_id])
+            logging.info(f"🗑 Удалено сообщение {message_id}")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logging.warning(f"⚠️ Не удалось удалить {message_id}: {e}")
 
-        if business_connection_id:
-            if hasattr(bot, "delete_business_messages"):
-                await bot.delete_business_messages(
-                    business_connection_id=business_connection_id,
-                    chat_id=chat_id,
-                    message_ids=[message_id]
-                )
-            else:
-                logging.warning("Обнови aiogram — нет метода delete_business_messages")
-        else:
-            await bot.delete_message(chat_id=chat_id, message_id=message_id)
-
-        logging.info(f"🗑 Удалено сообщение {message_id}")
-
-    except asyncio.CancelledError:
-        raise
-    except Exception as e:
-        logging.warning(f"⚠️ Не удалось удалить сообщение {message_id}: {e}")
-
-
-def schedule_delete(chat_id: int, message_id: int, business_connection_id: str | None):
-    task = asyncio.create_task(
-        delete_later(chat_id, message_id, business_connection_id, TROLL_DELETE_AFTER)
-    )
+    task = asyncio.create_task(_delete())
     delete_tasks.add(task)
     task.add_done_callback(delete_tasks.discard)
 
 
+def parse_command(text: str | None):
+    """Разбирает команду: возвращает (command, args) или (None, None)."""
+    if not text or not text.startswith("/"):
+        return None, None
+    parts = text.split(maxsplit=1)
+    cmd = parts[0].lower().split("@")[0]  # убираем @botname
+    args = parts[1] if len(parts) > 1 else ""
+    return cmd, args
+
+
 # ============================================================
-# === КОМАНДА /взлом ЦЕЛЬ (работает везде: личка, бизнес, группы) ===
+# === ОБРАБОТЧИК ВСЕХ ВХОДЯЩИХ СООБЩЕНИЙ ===
 # ============================================================
 
-async def _handle_vzlom(message: Message):
-    parts = (message.text or "").split(maxsplit=1)
+@client.on(events.NewMessage)
+async def handler(event: events.NewMessage.Event):
+    text = event.message.text or ""
+    cmd, args = parse_command(text)
 
-    if len(parts) < 2 or not parts[1].strip():
-        await message.answer("Использование:\n/взлом ХИТРЫЙ_ПАЦЫК")
+    if not cmd:
         return
 
-    target = html.escape(parts[1].strip()[:64])
-    cid = message.business_connection_id  # None в обычных чатах — это нормально
+    # === /взлом ЦЕЛЬ ===
+    if cmd == "/взлом":
+        target_raw = args.strip()
+        if not target_raw:
+            await event.respond("Использование:\n/взлом ХИТРЫЙ_ПАЦЫК")
+            return
 
-    temp = await message.answer(
-        f"🖥️ <b>ВЗЛОМ СИСТЕМЫ</b>\n\n"
-        f"🎯 Цель: <b>{target}</b>\n"
-        f"⏳ Начинаю взламывать...\n"
-        f"🔌 Подключение к цели... <code>OK</code>\n"
-        f"🔐 Обход защиты... <code>в процессе</code>",
-        parse_mode="HTML"
-    )
+        target = html.escape(target_raw[:64])
 
-    await asyncio.sleep(VZLOM_DELAY)
-    await edit_text(
-        message.chat.id, temp.message_id,
-        f"✅ <b>Взлом удался, вывожу информацию...</b>\n\n"
-        f"🎯 Цель: <b>{target}</b>\n"
-        f"🔓 Доступ получен: <code>root@{target}</code>\n"
-        f"📂 Чтение переписок... <code>67%</code>\n"
-        f"🖼️ Выгрузка фото... <code>34%</code>\n"
-        f"🔑 Подбор паролей... <code>готово</code>",
-        business_connection_id=cid, parse_mode="HTML"
-    )
-
-    await asyncio.sleep(VZLOM_DELAY)
-    await edit_text(
-        message.chat.id, temp.message_id,
-        f"😂 <b>Ладно, это была шутка!</b>\n\n"
-        f"🎯 <b>{target}</b> не взломан.\n"
-        f"Никакого взлома не было, расслабься 🎭",
-        business_connection_id=cid, parse_mode="HTML"
-    )
-
-
-@dp.business_message(command_filter("взлом"))
-async def cmd_vzlom_business(message: Message):
-    await _handle_vzlom(message)
-
-
-@dp.message(command_filter("взлом"))
-async def cmd_vzlom_message(message: Message):
-    await _handle_vzlom(message)
-
-
-# ============================================================
-# === ТРОЛЛИНГ (работает везде: личка, бизнес, группы) ===
-# ============================================================
-
-async def troll_worker(chat_id: int, username: str, delay: float, business_connection_id: str | None):
-    sent = 0
-    try:
-        while sent < MAX_TROLL_MESSAGES:
-            for phrase in TROLL_MESSAGES:
-                if sent >= MAX_TROLL_MESSAGES:
-                    break
-
-                msg = await send_text(chat_id, f"{username}, {phrase}", business_connection_id)
-                schedule_delete(chat_id, msg.message_id, business_connection_id)
-
-                sent += 1
-                if sent < MAX_TROLL_MESSAGES:
-                    await asyncio.sleep(delay)
-
-        await send_text(
-            chat_id,
-            f"✅ Троллинг завершён. Отправлено сообщений: {sent}.",
-            business_connection_id
+        # Этап 1
+        msg = await event.respond(
+            f"🖥️ **ВЗЛОМ СИСТЕМЫ**\n\n"
+            f"🎯 Цель: **{target}**\n"
+            f"⏳ Начинаю взламывать...\n"
+            f"🔌 Подключение к цели... `OK`\n"
+            f"🔐 Обход защиты... `в процессе`"
         )
 
-    except asyncio.CancelledError:
-        logging.info(f"🛑 Троллинг остановлен в чате {chat_id}")
-        raise
-    finally:
-        troll_tasks.pop(chat_id, None)
+        await asyncio.sleep(VZLOM_DELAY)
+        await msg.edit(
+            f"✅ **Взлом удался, вывожу информацию...**\n\n"
+            f"🎯 Цель: **{target}**\n"
+            f"🔓 Доступ получен: `root@{target}`\n"
+            f"📂 Чтение переписок... `67%`\n"
+            f"🖼️ Выгрузка фото... `34%`\n"
+            f"🔑 Подбор паролей... `готово`"
+        )
 
-
-async def _handle_troll(message: Message):
-    if message.from_user.id != OWNER_ID:
-        await message.answer("⛔ Команда /troll доступна только владельцу.")
-        return
-
-    chat_id = message.chat.id
-    cid = message.business_connection_id
-    parts = (message.text or "").split()
-
-    # /troll stop
-    if len(parts) >= 2 and parts[1].lower() == "stop":
-        task = troll_tasks.get(chat_id)
-        if task and not task.done():
-            task.cancel()
-            await message.answer("🛑 Троллинг остановлен. Уже отправленные сообщения удалятся сами.")
-        else:
-            await message.answer("Сейчас ничего не запущено.")
-        return
-
-    # /troll @username 5s
-    if len(parts) < 3:
-        await message.answer(
-            "Использование:\n"
-            "/troll @username 5s\n"
-            "/troll stop"
+        await asyncio.sleep(VZLOM_DELAY)
+        await msg.edit(
+            f"😂 **Ладно, это была шутка!**\n\n"
+            f"🎯 **{target}** не взломан.\n"
+            f"Никакого взлома не было, расслабься 🎭"
         )
         return
 
-    username = parts[1]
-    delay_raw = parts[2].lower().rstrip("s")
+    # === /troll ===
+    if cmd == "/troll":
+        if event.sender_id != OWNER_ID:
+            await event.respond("⛔ Команда /troll доступна только владельцу.")
+            return
 
-    if not re.fullmatch(r"@[A-Za-z0-9_]{5,32}", username):
-        await message.answer("❌ Укажи username в формате @username (5–32 символа: буквы, цифры, _).")
+        chat_id = event.chat_id
+        parts = args.split()
+
+        # /troll stop
+        if parts and parts[0].lower() == "stop":
+            task = troll_tasks.get(chat_id)
+            if task and not task.done():
+                task.cancel()
+                await event.respond("🛑 Троллинг остановлен. Уже отправленные сообщения удалятся сами.")
+            else:
+                await event.respond("Сейчас ничего не запущено.")
+            return
+
+        # /troll @username 5s
+        if len(parts) < 2:
+            await event.respond(
+                "Использование:\n"
+                "/troll @username 5s\n"
+                "/troll stop"
+            )
+            return
+
+        username = parts[0]
+        delay_raw = parts[1].lower().rstrip("s")
+
+        if not re.fullmatch(r"@[A-Za-z0-9_]{5,32}", username):
+            await event.respond("❌ Укажи username в формате @username (5–32 символа).")
+            return
+
+        try:
+            delay = float(delay_raw)
+        except ValueError:
+            await event.respond("❌ Задержка должна быть числом, например 5s.")
+            return
+
+        if delay < MIN_TROLL_DELAY or delay > MAX_TROLL_DELAY:
+            await event.respond(f"❌ Задержка от {MIN_TROLL_DELAY}s до {MAX_TROLL_DELAY}s.")
+            return
+
+        if not TROLL_MESSAGES:
+            await event.respond("❌ Список TROLL_MESSAGES пуст. Добавь фразы в main.py.")
+            return
+
+        existing = troll_tasks.get(chat_id)
+        if existing and not existing.done():
+            await event.respond("⚠️ В этом чате уже идёт троллинг. Останови: /troll stop")
+            return
+
+        # Старт
+        status_msg = await event.respond(f"Троллинг {username} начался.")
+
+        async def troll_worker():
+            sent = 0
+            try:
+                while sent < MAX_TROLL_MESSAGES:
+                    for phrase in TROLL_MESSAGES:
+                        if sent >= MAX_TROLL_MESSAGES:
+                            break
+                        msg = await client.send_message(chat_id, f"{username}, {phrase}")
+                        await schedule_delete(chat_id, msg.id, TROLL_DELETE_AFTER)
+                        sent += 1
+                        if sent < MAX_TROLL_MESSAGES:
+                            await asyncio.sleep(delay)
+
+                await client.send_message(chat_id, f"✅ Троллинг завершён. Отправлено: {sent}.")
+            except asyncio.CancelledError:
+                logging.info(f"🛑 Троллинг остановлен в чате {chat_id}")
+                raise
+            finally:
+                troll_tasks.pop(chat_id, None)
+
+        troll_tasks[chat_id] = asyncio.create_task(troll_worker())
         return
 
-    try:
-        delay = float(delay_raw)
-    except ValueError:
-        await message.answer("❌ Задержка должна быть числом, например 5s.")
-        return
 
-    if delay < MIN_TROLL_DELAY or delay > MAX_TROLL_DELAY:
-        await message.answer(f"❌ Задержка должна быть от {MIN_TROLL_DELAY}s до {MAX_TROLL_DELAY}s.")
-        return
-
-    if not TROLL_MESSAGES:
-        await message.answer("❌ Список TROLL_MESSAGES пуст. Добавь фразы в main.py.")
-        return
-
-    existing = troll_tasks.get(chat_id)
-    if existing and not existing.done():
-        await message.answer("⚠️ В этом чате уже идёт троллинг. Останови: /troll stop")
-        return
-
-    temp = await message.answer("⏳ Подготовка троллинга...")
-    await edit_text(chat_id, temp.message_id, f"Троллинг {username} начался.", business_connection_id=cid)
-
-    troll_tasks[chat_id] = asyncio.create_task(
-        troll_worker(chat_id, username, delay, cid)
-    )
-
-
-@dp.business_message(command_filter("troll"))
-async def cmd_troll_business(message: Message):
-    await _handle_troll(message)
-
-
-@dp.message(command_filter("troll"))
-async def cmd_troll_message(message: Message):
-    await _handle_troll(message)
-
+# ============================================================
+# === ЗАПУСК ===
+# ============================================================
 
 async def main():
-    logging.info("🚀 Бот запущен. Команды: /взлом, /troll (работают в ЛС, бизнес-режиме и группах)")
-    await dp.start_polling(
-        bot,
-        allowed_updates=[
-            "message",
-            "edited_message",
-            "business_message",
-            "edited_business_message",
-            "business_connection",
-            "deleted_business_messages",
-        ],
-    )
+    logging.info("🚀 Запуск userbot'а...")
+    await client.start()
+    me = await client.get_me()
+    logging.info(f"✅ Залогинен как: {me.first_name} (ID: {me.id})")
+    logging.info(f"👑 Владелец: {OWNER_ID}")
+    logging.info("Команды: /взлом, /troll (работают в ЛС, группах, каналах)")
+
+    await client.run_until_disconnected()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    with client:
+        client.loop.run_until_complete(main())
