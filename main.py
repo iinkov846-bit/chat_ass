@@ -10,9 +10,9 @@ from openai import AsyncOpenAI
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 # === ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ (задаются в Railway → Variables) ===
-BOT_TOKEN = os.getenv("BOT_TOKEN")          # Токен от @BotFather
-OWNER_ID = int(os.getenv("OWNER_ID"))       # Ваш Telegram ID (куда слать копии)
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")# Ключ OpenAI (sk-...)
+BOT_TOKEN = os.getenv("BOT_TOKEN")           # Токен от @BotFather
+OWNER_ID = int(os.getenv("OWNER_ID"))        # Ваш Telegram ID (куда слать копии)
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") # Ключ OpenAI (sk-...)
 
 if not all([BOT_TOKEN, OWNER_ID, OPENAI_API_KEY]):
     raise ValueError("Ошибка: Не все переменные окружения заданы в Railway!")
@@ -83,6 +83,65 @@ async def ask_gpt(chat_id: int, user_name: str, new_message: str) -> str:
         return "Я сейчас очень занят, но обязательно отвечу тебе чуть позже! 🙏"
 
 
+# === НАДЁЖНОЕ СОХРАНЕНИЕ СООБЩЕНИЯ ВЛАДЕЛЬЦУ ===
+# Не используем copy_message, т.к. он не поддерживает business_connection_id.
+# Вместо этого отправляем владельцу независимую копию内容的 сообщения.
+async def save_message_to_owner(message: Message):
+    sender = message.from_user
+    username = f"@{sender.username}" if sender.username else "без username"
+    header = (
+        "📥 Новое сообщение вам\n"
+        f"👤 От: {sender.full_name} ({username})\n"
+        f"🆔 ID: {sender.id}\n"
+        f"💬 Чат: {message.chat.id}"
+    )
+
+    # Текст: сохраняем одной消息ью с заголовком
+    if message.text:
+        await bot.send_message(
+            chat_id=OWNER_ID,
+            text=f"{header}\n\n💬 Текст:\n{message.text}"
+        )
+        return
+
+    # Для медиа сначала отправляем заголовок, потом сам файл
+    await bot.send_message(chat_id=OWNER_ID, text=header)
+
+    if message.photo:
+        await bot.send_photo(OWNER_ID, message.photo[-1].file_id, caption=message.caption)
+    elif message.video:
+        await bot.send_video(OWNER_ID, message.video.file_id, caption=message.caption)
+    elif message.voice:
+        await bot.send_voice(OWNER_ID, message.voice.file_id, caption=message.caption)
+    elif message.audio:
+        await bot.send_audio(OWNER_ID, message.audio.file_id, caption=message.caption)
+    elif message.document:
+        await bot.send_document(OWNER_ID, message.document.file_id, caption=message.caption)
+    elif message.animation:
+        await bot.send_animation(OWNER_ID, message.animation.file_id, caption=message.caption)
+    elif message.sticker:
+        await bot.send_sticker(OWNER_ID, message.sticker.file_id)
+    elif message.video_note:
+        await bot.send_video_note(OWNER_ID, message.video_note.file_id)
+    elif message.contact:
+        c = message.contact
+        await bot.send_contact(
+            OWNER_ID,
+            phone_number=c.phone_number,
+            first_name=c.first_name,
+            last_name=c.last_name
+        )
+    elif message.location:
+        loc = message.location
+        await bot.send_location(OWNER_ID, latitude=loc.latitude, longitude=loc.longitude)
+    else:
+        await bot.send_message(
+            OWNER_ID,
+            f"⚠️ Получено сообщение типа '{message.content_type}', "
+            f"его не удалось скопировать автоматически."
+        )
+
+
 # === Сообщения ОТ ВЛАДЕЛЬЦА: сбрасываем счётчик (бот замолкает) ===
 @dp.business_message(F.from_user.id == OWNER_ID)
 async def handle_owner_message(message: Message):
@@ -101,27 +160,26 @@ async def handle_owner_message(message: Message):
 async def handle_business_message(message: Message):
     chat_id = message.chat.id
     sender_name = message.from_user.first_name or "Друг"
-    text = message.text or ""
+    raw_text = message.text or message.caption or ""
+    text_for_gpt = raw_text or f"[{message.content_type}]"
 
     try:
         # ШАГ 1: индикатор (business_connection_id подставляется АВТОМАТИЧЕСКИ)
         temp_message = await message.answer(text="⏳ Обрабатываю...")
 
-        # ШАГ 2: копия владельцу (защита от удаления) — параметр нужен явно
-        await bot.copy_message(
-            chat_id=OWNER_ID,
-            from_chat_id=message.chat.id,
-            message_id=message.message_id,
-            business_connection_id=message.business_connection_id
-        )
+        # ШАГ 2: сохраняем копию владельцу (защита от удаления)
+        try:
+            await save_message_to_owner(message)
+        except Exception as e:
+            logging.error(f"❌ Не удалось сохранить сообщение владельцу: {e}")
 
         # ШАГ 3: счётчик и решение, нужен ли GPT
         message_counter[chat_id] += 1
-        use_gpt = (message_counter[chat_id] >= PERSISTENT_THRESHOLD) or is_persistent(text)
+        use_gpt = (message_counter[chat_id] >= PERSISTENT_THRESHOLD) or is_persistent(raw_text)
 
         if use_gpt:
             await asyncio.sleep(1.5)
-            gpt_reply = await ask_gpt(chat_id, sender_name, text)
+            gpt_reply = await ask_gpt(chat_id, sender_name, text_for_gpt)
             await bot.edit_message_text(
                 chat_id=message.chat.id,
                 message_id=temp_message.message_id,
