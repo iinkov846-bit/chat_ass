@@ -5,61 +5,147 @@ import random
 from collections import defaultdict
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, BusinessConnection, Update
-from openai import AsyncOpenAI
 
 # === ЛОГИРОВАНИЕ ===
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 # === ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ (Railway → Variables) ===
-BOT_TOKEN = os.getenv("BOT_TOKEN")             # Токен от @BotFather
-OWNER_ID = int(os.getenv("OWNER_ID"))          # Ваш Telegram ID (куда слать копии)
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")   # Универсальный слот: ключ Qwen / Groq / OpenRouter
+BOT_TOKEN = os.getenv("BOT_TOKEN")       # Токен от @BotFather
+OWNER_ID_RAW = os.getenv("OWNER_ID")     # Ваш Telegram ID (куда слать копии)
+DEBUG = os.getenv("DEBUG", "1") == "1"   # 1 = логировать сырые обновления, 0 = тишина
 
-# Qwen по умолчанию — официальный международный эндпоинт Alibaba Model Studio.
-# ВАЖНО: если консоль показала другой API Host — вставь его в OPENAI_BASE_URL.
-OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "qwen-plus")
-DEBUG = os.getenv("DEBUG", "1") == "1"         # 1 = логировать сырые обновления, 0 = тишина
-
-if not all([BOT_TOKEN, OWNER_ID, OPENAI_API_KEY]):
-    raise ValueError("Ошибка: задай BOT_TOKEN, OWNER_ID и OPENAI_API_KEY в Railway!")
+if not BOT_TOKEN or not OWNER_ID_RAW:
+    raise ValueError("Ошибка: задай BOT_TOKEN и OWNER_ID в Railway!")
+OWNER_ID = int(OWNER_ID_RAW)
 
 # === ИНИЦИАЛИЗАЦИЯ ===
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
-openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL)
 
 # === НАСТРОЙКИ ПОВЕДЕНИЯ ===
+# С какого сообщения подряд начинать грубить. Поставь 1, чтобы грубить с первого.
 PERSISTENT_THRESHOLD = 2
-CONTEXT_HISTORY_SIZE = 10
 TRIGGER_WORDS = {"ну", "алло", "ты тут", "ответь", "hello", "are you there", "ты здесь", "ау"}
 
-message_counter = defaultdict(int)
-chat_history = defaultdict(list)
+message_counter = defaultdict(int)   # счётчик сообщений подряд от собеседника
+last_phrase = {}                     # последняя фраза для антиповтора
 
-# === ЖЁСТКИЙ ХАРАКТЕР АССИСТЕНТА ===
-SYSTEM_PROMPT = """Ты — дерзкий, жёсткий и саркастичный личный ассистент владельца этого Telegram-аккаунта.
-Отвечай от первого лица ("я"), как будто ты — это он сам.
-Стиль: грубоватый, нетерпеливый, прямолинейный, с сарказмом и чёрным юмором. Без сюсюканий.
-Собеседник настойчиво долбит сообщениями — жёстко осади его, дай понять, что он отвлекает.
-Отвечай коротко и хлёстко, как в реальной переписке.
-НИКОГДА не признавайся, что ты ИИ или бот. Если спрашивают кто ты — огрызайся: "Не твоё дело, я занят".
-Будь резким, но без угроз расправы и без оскорблений по национальности, полу и т.п.
-Примеры тона: "Чего надо? Я занят. Пиши по делу.", "Ты читать умеешь? Жди, не видишь — занят.", "Ещё раз напишешь 'ну' — вообще отвечать перестану."
-"""
-
-# === РАЗНЫЕ ГРУБЫЕ ЗАГЛУШКИ (если API недоступен / лимит) ===
-FALLBACK_REPLIES = [
-    "Я занят. Отвечу, когда освобожусь. Не долби. 😤",
-    "Ты глухой? Я сказал — занят. Жди.",
-    "Чего надо? Пиши по делу, а не спамь.",
-    "Я тебе что, справочная? Подожди, не видишь — занят.",
-    "Ещё одно 'ну' — и я вообще отвечать перестану. Жди.",
-    "Сейчас не до тебя. Освобожусь — напишу. Всё.",
+# === 100 ГРУБЫХ ФРАЗ (редактируй freely) ===
+RUDE_REPLIES = [
+    "Чего надо? Я занят. Пиши по делу.",
+    "Не долби, я всё видел. Отвечу, когда смогу.",
+    "Ты серьёзно? Жди, не видишь — занят.",
+    "Я тебе не справочная. Подожди.",
+    "Хватит спамить. Освобожусь — напишу.",
+    "Ещё одно 'ну' — и я вообще отвечать перестану.",
+    "Сейчас не до тебя. Жди.",
+    "Я занят. Твоё сообщение в очереди, не дёргайся.",
+    "Тебе повторить? Я занят.",
+    "Пиши по делу, а не спамь.",
+    "Я не игнорю, я занят. Разницу чувствуешь?",
+    "Подожди, не видишь — я не у телефона.",
+    "Чего разнылся? Отвечу, когда освобожусь.",
+    "Не надо паники. Я прочитаю и отвечу.",
+    "Ты меня достал. Жди молча.",
+    "Я занят, а не умер. Отвечу позже.",
+    "Хватит дёргать. Всё дойдёт до меня.",
+    "Не долби в личку. Я всё вижу.",
+    "Твоё 'срочно' подождёт. Я занят.",
+    "Я не обязан отвечать сию секунду. Жди.",
+    "Спамить будешь в другом месте. Тут я занят.",
+    "У меня дела. Твоё сообщение не горит.",
+    "Прекрати долбить. Отвечу, когда смогу.",
+    "Я занят. Не надо делать из этого драму.",
+    "Ты читать умеешь? Я занят.",
+    "Не видишь — я не у телефона. Подожди.",
+    "Я тебе что, круглосуточная поддержка? Жди.",
+    "Хватит. Я отвечу, когда освобожусь.",
+    "Не дёргай меня. Всё прочитаю.",
+    "Я занят. Твоё сообщение подождёт.",
+    "Чего прилип? Я занят, отвечу позже.",
+    "Не надо истерик. Я на связи, но занят.",
+    "Ты меня задолбал. Жди.",
+    "Я не игнорю специально. Я занят.",
+    "Пиши нормально, а не 'ну' и 'ау'.",
+    "Я занят. Не заставляй меня жалеть, что я на связи.",
+    "Хватит ныть. Отвечу, когда смогу.",
+    "Я занят, а не справочное бюро. Подожди.",
+    "Твоё сообщение не срочнее моих дел. Жди.",
+    "Не долби. Я и так отвечу, когда освобожусь.",
+    "Я занят. Умерь пыл.",
+    "Ты серьёзно думаешь, что я брошу всё ради тебя? Жди.",
+    "Не надо давить. Я отвечу, когда смогу.",
+    "Я занят. Твоя настойчивость не ускоряет ответ.",
+    "Хватит стучаться. Я всё вижу.",
+    "Я не у телефона. Прекрати долбить.",
+    "Ты меня утомил. Жди.",
+    "Я занят. Не надо делать вид, что это срочно.",
+    "Пиши по делу. Пустой спам я игнорю.",
+    "Я занят. Твоё 'ну' не поможет.",
+    "Не дёргай. Отвечу, когда освобожусь.",
+    "Я занят. Твоя паника — не моя проблема.",
+    "Хватит. Я не обязан отвечать мгновенно.",
+    "Я занят. Подожди, не будь навязчивым.",
+    "Ты читать умеешь? Я сказал — позже.",
+    "Я занят. Не надо превращать это в цирк.",
+    "Не долби мне мозг. Жди.",
+    "Я занят. Твоё сообщение в очереди.",
+    "Прекрати спамить. Я отвечу, когда смогу.",
+    "Я занят. Не надо истерить.",
+    "Ты меня достал своим 'ну'. Жди.",
+    "Я занят. Твоё 'срочно' подождёт.",
+    "Не вижу смысла отвечать на спам. Пиши по делу.",
+    "Я занят. Угомонись.",
+    "Хватит дёргать меня по пустякам.",
+    "Я занят. Твоё сообщение не пуп земли.",
+    "Не надо давить на жалость. Я отвечу позже.",
+    "Я занят. Твоя настойчивость раздражает.",
+    "Пиши по делу, тогда отвечу быстрее.",
+    "Я занят. Не долби, как в последний раз.",
+    "Ты серьёзно? Я занят, отстань на время.",
+    "Я занят. Не надо делать из себя жертву.",
+    "Хватит. Я отвечу, когда освобожусь, и не раньше.",
+    "Я занят. Твоё 'ау' не ускорит процесс.",
+    "Не дёргай меня. Я и так всё вижу.",
+    "Я занят. Твоё сообщение подождёт, и ты подождёшь.",
+    "Прекрати долбить. Я не обязан реагировать мгновенно.",
+    "Я занят. Не надо спамить, как будто я игнорю.",
+    "Ты меня утомил своей настойчивостью. Жди.",
+    "Я занят. Пиши по делу или жди.",
+    "Хватит ныть. Я отвечу, когда смогу.",
+    "Я занят. Твоё 'ну что' не поможет.",
+    "Не долби. Я отвечу, когда освобожусь.",
+    "Я занят. Твоя паника мне не указ.",
+    "Ты читать умеешь? Я занят, отвечу позже.",
+    "Я занят. Не надо превращать переписку в допрос.",
+    "Хватит. Я не справочная, я занят.",
+    "Я занят. Твоё сообщение не горит, угомонись.",
+    "Не дёргай. Я отвечу, когда будет время.",
+    "Я занят. Твоя настойчивость не делает тебя важнее.",
+    "Пиши нормально. На 'ну' и 'ау' я не реагирую.",
+    "Я занят. Не надо давить, это не работает.",
+    "Хватит спамить. Я отвечу, когда освобожусь.",
+    "Я занят. Твоё 'срочно' — не моя проблема.",
+    "Не долби мне личку. Я всё вижу.",
+    "Я занят. Твоё сообщение подождёт, не истери.",
+    "Ты меня задолбал. Отвечу, когда смогу.",
+    "Я занят. Не надо делать вид, что я обязан.",
+    "Хватит. Я отвечу, когда освобожусь. Всё.",
+    "Я занят. Пиши по делу, а не долби.",
 ]
 
 
-# === ОТЛАДКА (можно отключить переменной DEBUG=0) ===
+def get_rude_reply(chat_id: int) -> str:
+    """Случайная грубая фраза без повтора предыдущей для этого чата."""
+    phrase = random.choice(RUDE_REPLIES)
+    if len(RUDE_REPLIES) > 1:
+        while phrase == last_phrase.get(chat_id):
+            phrase = random.choice(RUDE_REPLIES)
+    last_phrase[chat_id] = phrase
+    return phrase
+
+
+# === ОТЛАДКА (отключается переменной DEBUG=0) ===
 @dp.update()
 async def debug_all_updates(update: Update):
     if DEBUG:
@@ -75,28 +161,6 @@ def is_persistent(text: str) -> bool:
     if not text:
         return False
     return any(word in text.lower() for word in TRIGGER_WORDS)
-
-
-async def ask_gpt(chat_id: int, user_name: str, new_message: str) -> str:
-    chat_history[chat_id].append({"role": "user", "content": new_message})
-    history = chat_history[chat_id][-CONTEXT_HISTORY_SIZE:]
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "system", "content": f"Имя собеседника: {user_name}. Отвечай ему лично."}
-    ] + history
-    try:
-        response = await openai_client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=messages,
-            max_tokens=300,
-            temperature=0.8,
-        )
-        reply = response.choices[0].message.content.strip()
-        chat_history[chat_id].append({"role": "assistant", "content": reply})
-        return reply
-    except Exception as e:
-        logging.error(f"❌ Ошибка API: {e}")
-        return random.choice(FALLBACK_REPLIES)
 
 
 # === СОХРАНЕНИЕ СООБЩЕНИЯ ВЛАДЕЛЬЦУ (независимая копия, не удалится) ===
@@ -142,59 +206,60 @@ async def save_message_to_owner(message: Message):
         await bot.send_message(OWNER_ID, f"⚠️ Сообщение типа '{message.content_type}' не удалось скопировать автоматически.")
 
 
+# === Если владелец сам ответил — бот замолкает и сбрасывает счётчик ===
 @dp.business_message(F.from_user.id == OWNER_ID)
 async def handle_owner_message(message: Message):
     if getattr(message, "sender_business_bot", None) is not None:
         return
     chat_id = message.chat.id
-    if chat_id in message_counter:
-        message_counter[chat_id] = 0
-        chat_history[chat_id].clear()
-        logging.info(f"🔁 Владелец вступил в диалог с чатом {chat_id} — бот замолкает")
+    message_counter[chat_id] = 0
+    last_phrase.pop(chat_id, None)
+    logging.info(f"🔁 Владелец вступил в диалог с чатом {chat_id} — счётчик сброшен")
 
 
+# === ОСНОВНОЙ ОБРАБОТЧИК: сообщения от других людей ===
 @dp.business_message(F.from_user.id != OWNER_ID)
 async def handle_business_message(message: Message):
     chat_id = message.chat.id
     sender_name = message.from_user.first_name or "Друг"
     raw_text = message.text or message.caption or ""
-    text_for_gpt = raw_text or f"[{message.content_type}]"
 
     try:
+        # ШАГ 1: индикатор (business_connection_id подставляется автоматически)
         temp_message = await message.answer(text="⏳ Обрабатываю...")
 
+        # ШАГ 2: сохраняем копию владельцу
         try:
             await save_message_to_owner(message)
         except Exception as e:
             logging.error(f"❌ Не удалось сохранить сообщение владельцу: {e}")
 
+        # ШАГ 3: счётчик и решение — грубить или нейтрально
         message_counter[chat_id] += 1
-        use_gpt = (message_counter[chat_id] >= PERSISTENT_THRESHOLD) or is_persistent(raw_text)
+        use_rude = (message_counter[chat_id] >= PERSISTENT_THRESHOLD) or is_persistent(raw_text)
 
-        if use_gpt:
-            await asyncio.sleep(1.5)
-            reply = await ask_gpt(chat_id, sender_name, text_for_gpt)
-            await bot.edit_message_text(
-                chat_id=message.chat.id,
-                message_id=temp_message.message_id,
-                text=reply,
-                business_connection_id=message.business_connection_id
-            )
-            logging.info(f"🤖 Ответил {sender_name}")
+        await asyncio.sleep(1)
+
+        if use_rude:
+            reply = get_rude_reply(chat_id)
+            logging.info(f"😤 Грубый ответ для {sender_name}")
         else:
-            await asyncio.sleep(1)
-            await bot.edit_message_text(
-                chat_id=message.chat.id,
-                message_id=temp_message.message_id,
-                text=f"✅ {sender_name}, сообщение получено. Жди, отвечу.",
-                business_connection_id=message.business_connection_id
-            )
-            logging.info(f"📨 Стандартный ответ для {sender_name}")
+            reply = f"✅ {sender_name}, сообщение получено. Жди, отвечу."
+            logging.info(f"📨 Нейтральный ответ для {sender_name}")
+
+        # ШАГ 4: редактируем наше сообщение на финальный ответ
+        await bot.edit_message_text(
+            chat_id=message.chat.id,
+            message_id=temp_message.message_id,
+            text=reply,
+            business_connection_id=message.business_connection_id
+        )
 
     except Exception as e:
         logging.error(f"❌ Ошибка при обработке сообщения: {e}")
 
 
+# === ТЕСТОВЫЙ РЕЖИМ: пишите боту напрямую (только для владельца) ===
 @dp.message(F.chat.type == "private", ~F.business_connection_id)
 async def test_direct_message(message: Message):
     if message.from_user.id != OWNER_ID:
@@ -203,18 +268,16 @@ async def test_direct_message(message: Message):
     text = message.text or ""
     if text.startswith("/start"):
         await message.answer(
-            "🧪 Тестовый режим.\n\nНапиши любой текст — прогоню через Qwen.\n"
+            "🧪 Тестовый режим (без ИИ).\n\n"
+            "Напиши любой текст — выдам случайную грубую фразу из списка.\n"
             "⚠️ Основная логика работает, когда ДРУГОЙ человек пишет на ваш аккаунт."
         )
         return
-    await message.answer("⏳ Думаю...")
-    reply = await ask_gpt(message.chat.id, message.from_user.first_name or "Владелец", text)
-    await message.answer(f"🤖 Ответ:\n\n{reply}")
+    await message.answer(get_rude_reply(message.chat.id))
 
 
 async def main():
-    logging.info("🚀 Запуск персонального бизнес-бота...")
-    logging.info(f"🧠 Модель: {OPENAI_MODEL} | Эндпоинт: {OPENAI_BASE_URL}")
+    logging.info("🚀 Запуск бота (без ИИ, 100 грубых фраз)...")
     await dp.start_polling(
         bot,
         allowed_updates=[
