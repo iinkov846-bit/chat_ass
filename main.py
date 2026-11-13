@@ -23,20 +23,16 @@ dp = Dispatcher()
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
 # === НАСТРОЙКИ ПОВЕДЕНИЯ БОТА ===
-# Через сколько сообщений подряд включать GPT (2 = на 2-м сообщении)
 PERSISTENT_THRESHOLD = 2
-# Сколько последних сообщений хранить в памяти для контекста GPT
 CONTEXT_HISTORY_SIZE = 10
-# Слова-маркеры, при которых GPT включается сразу
 TRIGGER_WORDS = {"ну", "алло", "ты тут", "ответь", "hello", "are you there", "ты здесь", "ау"}
 
 # === ХРАНИЛИЩА В ПАМЯТИ ===
-# {user_id: количество_сообщений_подряд}
+# Используем chat_id как ключ (в ЛС chat_id == user_id)
 message_counter = defaultdict(int)
-# {user_id: [список_последних_сообщений]}
 chat_history = defaultdict(list)
 
-# Системный промпт для GPT — "душа" вашего ассистента
+# Системный промпт для GPT
 SYSTEM_PROMPT = """Ты — личный ассистент владельца этого Telegram-аккаунта. 
 Отвечай от первого лица ("я"), как будто ты — это он сам.
 Стиль: дружелюбный, краткий, естественный, как в обычной переписке.
@@ -60,15 +56,11 @@ def is_persistent(text: str) -> bool:
     return any(word in text_lower for word in TRIGGER_WORDS)
 
 
-async def ask_gpt(user_id: int, user_name: str, new_message: str) -> str:
+async def ask_gpt(chat_id: int, user_name: str, new_message: str) -> str:
     """Отправляет запрос в ChatGPT с учётом истории переписки."""
-    # Добавляем новое сообщение в историю
-    chat_history[user_id].append({"role": "user", "content": new_message})
+    chat_history[chat_id].append({"role": "user", "content": new_message})
+    history = chat_history[chat_id][-CONTEXT_HISTORY_SIZE:]
     
-    # Обрезаем историю до нужного размера
-    history = chat_history[user_id][-CONTEXT_HISTORY_SIZE:]
-    
-    # Формируем сообщения для API
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "system", "content": f"Имя собеседника: {user_name}. Отвечай ему лично."}
@@ -76,15 +68,13 @@ async def ask_gpt(user_id: int, user_name: str, new_message: str) -> str:
     
     try:
         response = await openai_client.chat.completions.create(
-            model="gpt-4o-mini",  # Дешёвая и быстрая модель
+            model="gpt-4o-mini",
             messages=messages,
-            max_tokens=300,       # Короткие ответы — как в мессенджере
+            max_tokens=300,
             temperature=0.7,
         )
         reply = response.choices[0].message.content.strip()
-        
-        # Сохраняем ответ ассистента в историю, чтобы GPT помнил, что уже говорил
-        chat_history[user_id].append({"role": "assistant", "content": reply})
+        chat_history[chat_id].append({"role": "assistant", "content": reply})
         return reply
         
     except Exception as e:
@@ -92,9 +82,22 @@ async def ask_gpt(user_id: int, user_name: str, new_message: str) -> str:
         return "Я сейчас очень занят, но обязательно отвечу тебе чуть позже! 🙏"
 
 
-# === 3. Основной обработчик входящих сообщений ===
-@dp.message(F.business_connection_id)
+# === 3. Обработчик сообщений ОТ ВЛАДЕЛЬЦА (сброс счётчика) ===
+@dp.message(F.business_connection_id & F.from_user.id == OWNER_ID)
+async def handle_owner_message(message: Message):
+    """Если владелец сам пишет собеседнику — сбрасываем счётчик настойчивости."""
+    chat_id = message.chat.id
+    if chat_id in message_counter:
+        message_counter[chat_id] = 0
+        chat_history[chat_id].clear()
+        logging.info(f"🔁 Владелец вступил в диалог с чатом {chat_id} — бот замолкает")
+
+
+# === 4. Основной обработчик входящих сообщений ===
+@dp.message(F.business_connection_id & (F.from_user.id != OWNER_ID))
 async def handle_business_message(message: Message):
+    """Обрабатывает сообщения от других пользователей."""
+    chat_id = message.chat.id
     user_id = message.from_user.id
     sender_name = message.from_user.first_name or "Друг"
     text = message.text or ""
@@ -115,15 +118,14 @@ async def handle_business_message(message: Message):
         )
         
         # ШАГ 3: Обновляем счётчик сообщений от этого пользователя
-        message_counter[user_id] += 1
+        message_counter[chat_id] += 1
         
         # ШАГ 4: Определяем, нужен ли GPT
-        use_gpt = (message_counter[user_id] >= PERSISTENT_THRESHOLD) or is_persistent(text)
+        use_gpt = (message_counter[chat_id] >= PERSISTENT_THRESHOLD) or is_persistent(text)
         
         if use_gpt:
-            # Подключаем "умного" ассистента
-            await asyncio.sleep(1.5)  # Немного больше задержка — GPT думает
-            gpt_reply = await ask_gpt(user_id, sender_name, text)
+            await asyncio.sleep(1.5)
+            gpt_reply = await ask_gpt(chat_id, sender_name, text)
             
             await bot.edit_message_text(
                 chat_id=message.chat.id,
@@ -133,7 +135,6 @@ async def handle_business_message(message: Message):
             )
             logging.info(f"🤖 GPT ответил {sender_name}: {gpt_reply[:50]}...")
         else:
-            # Первое сообщение — просто стандартная отписка
             await asyncio.sleep(1)
             await bot.edit_message_text(
                 chat_id=message.chat.id,
@@ -145,21 +146,6 @@ async def handle_business_message(message: Message):
             
     except Exception as e:
         logging.error(f"❌ Ошибка при обработке сообщения: {e}")
-
-
-# === 4. Сброс счётчика, если владелец САМ ответил пользователю ===
-# (Это важно: если вы сами вступили в диалог, бот должен замолчать)
-@dp.business_message_deleted()
-@dp.message(F.business_connection_id & (F.from_user.id == OWNER_ID))
-async def reset_counter_on_owner_reply(message: Message):
-    """Если владелец сам пишет собеседнику — сбрасываем счётчик настойчивости."""
-    # В бизнес-режиме сообщения от владельца приходят с тем же business_connection_id
-    # и chat_id = ID собеседника. Сбрасываем для этого чата.
-    # Находим user_id по chat_id (в ЛС они совпадают)
-    if message.chat.id in message_counter:
-        message_counter[message.chat.id] = 0
-        chat_history[message.chat.id].clear()
-        logging.info(f"🔁 Владелец вступил в диалог с {message.chat.id} — бот замолкает")
 
 
 async def main():
