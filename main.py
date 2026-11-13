@@ -4,7 +4,7 @@ import html
 import logging
 import asyncio
 
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message
 
 
@@ -26,7 +26,7 @@ dp = Dispatcher()
 # === НАСТРОЙКИ ===
 # ============================================================
 
-VZLOM_DELAY = 5          # пауза между этапами /взлом
+VZLOM_DELAY = 5  # пауза между этапами /взлом
 
 # === СООБЩЕНИЯ ДЛЯ /troll (добавь свои фразы сюда) ===
 # Бот сам подставит "@username, " в начало каждой строки.
@@ -56,14 +56,14 @@ TROLL_MESSAGES = [
     "я снова те матуху выебал, уже подзаебался",
 ]
 
-MIN_TROLL_DELAY = 3      # минимальная задержка между сообщениями
-MAX_TROLL_DELAY = 60     # максимальная задержка
-MAX_TROLL_MESSAGES = 20  # максимум сообщений за запуск
+MIN_TROLL_DELAY = 3
+MAX_TROLL_DELAY = 60
+MAX_TROLL_MESSAGES = 20
 
-TROLL_DELETE_AFTER = 5   # через сколько секунд удалять сообщения троллинга
+TROLL_DELETE_AFTER = 5  # через сколько секунд удалять сообщения троллинга
 
 troll_tasks: dict[int, asyncio.Task] = {}
-delete_tasks: set[asyncio.Task] = set()   # задачи автоудаления
+delete_tasks: set[asyncio.Task] = set()
 
 
 # ============================================================
@@ -84,7 +84,7 @@ def command_filter(*names: str):
 
 
 async def send_text(chat_id, text, business_connection_id=None, parse_mode=None) -> Message:
-    """Отправляет сообщение и возвращает его (чтобы знать message_id для удаления)."""
+    """Отправляет сообщение. В бизнес-чате подставляет business_connection_id."""
     kwargs = {}
     if business_connection_id:
         kwargs["business_connection_id"] = business_connection_id
@@ -103,12 +103,11 @@ async def edit_text(chat_id, message_id, text, business_connection_id=None, pars
 
 
 async def delete_later(chat_id: int, message_id: int, business_connection_id: str | None, delay: float):
-    """Удаляет сообщение через заданное количество секунд."""
+    """Удаляет сообщение через delay секунд."""
     try:
         await asyncio.sleep(delay)
 
         if business_connection_id:
-            # Удаление от имени бизнес-аккаунта
             if hasattr(bot, "delete_business_messages"):
                 await bot.delete_business_messages(
                     business_connection_id=business_connection_id,
@@ -129,7 +128,6 @@ async def delete_later(chat_id: int, message_id: int, business_connection_id: st
 
 
 def schedule_delete(chat_id: int, message_id: int, business_connection_id: str | None):
-    """Запускает автоудаление в фоне, не блокируя отправку следующих сообщений."""
     task = asyncio.create_task(
         delete_later(chat_id, message_id, business_connection_id, TROLL_DELETE_AFTER)
     )
@@ -138,12 +136,10 @@ def schedule_delete(chat_id: int, message_id: int, business_connection_id: str |
 
 
 # ============================================================
-# === КОМАНДА /взлом ЦЕЛЬ ===
+# === КОМАНДА /взлом ЦЕЛЬ (работает везде: личка, бизнес, группы) ===
 # ============================================================
 
-@dp.business_message(command_filter("взлом"))
-@dp.message(command_filter("взлом"))
-async def cmd_vzlom(message: Message):
+async def _handle_vzlom(message: Message):
     parts = (message.text or "").split(maxsplit=1)
 
     if len(parts) < 2 or not parts[1].strip():
@@ -151,7 +147,7 @@ async def cmd_vzlom(message: Message):
         return
 
     target = html.escape(parts[1].strip()[:64])
-    cid = message.business_connection_id
+    cid = message.business_connection_id  # None в обычных чатах — это нормально
 
     temp = await message.answer(
         f"🖥️ <b>ВЗЛОМ СИСТЕМЫ</b>\n\n"
@@ -184,8 +180,18 @@ async def cmd_vzlom(message: Message):
     )
 
 
+@dp.business_message(command_filter("взлом"))
+async def cmd_vzlom_business(message: Message):
+    await _handle_vzlom(message)
+
+
+@dp.message(command_filter("взлом"))
+async def cmd_vzlom_message(message: Message):
+    await _handle_vzlom(message)
+
+
 # ============================================================
-# === ТРОЛЛИНГ ===
+# === ТРОЛЛИНГ (работает везде: личка, бизнес, группы) ===
 # ============================================================
 
 async def troll_worker(chat_id: int, username: str, delay: float, business_connection_id: str | None):
@@ -216,9 +222,7 @@ async def troll_worker(chat_id: int, username: str, delay: float, business_conne
         troll_tasks.pop(chat_id, None)
 
 
-@dp.business_message(command_filter("troll"))
-@dp.message(command_filter("troll"))
-async def cmd_troll(message: Message):
+async def _handle_troll(message: Message):
     if message.from_user.id != OWNER_ID:
         await message.answer("⛔ Команда /troll доступна только владельцу.")
         return
@@ -280,9 +284,29 @@ async def cmd_troll(message: Message):
     )
 
 
+@dp.business_message(command_filter("troll"))
+async def cmd_troll_business(message: Message):
+    await _handle_troll(message)
+
+
+@dp.message(command_filter("troll"))
+async def cmd_troll_message(message: Message):
+    await _handle_troll(message)
+
+
 async def main():
-    logging.info("🚀 Бот запущен. Команды: /взлом, /troll")
-    await dp.start_polling(bot, allowed_updates=["message", "business_message"])
+    logging.info("🚀 Бот запущен. Команды: /взлом, /troll (работают в ЛС, бизнес-режиме и группах)")
+    await dp.start_polling(
+        bot,
+        allowed_updates=[
+            "message",
+            "edited_message",
+            "business_message",
+            "edited_business_message",
+            "business_connection",
+            "deleted_business_messages",
+        ],
+    )
 
 
 if __name__ == "__main__":
