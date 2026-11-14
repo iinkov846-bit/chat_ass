@@ -13,7 +13,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 OWNER_ID_RAW = os.getenv("OWNER_ID")
-DEBUG = os.getenv("DEBUG", "1") == "1"
+DEBUG = os.getenv("DEBUG", "0") == "1"
 
 GROQ_BASE_URL = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "qwen/qwen3-32b")
@@ -41,7 +41,7 @@ SYSTEM_PROMPT = """Ты — дружелюбный и полезный асси�
 Не выдумывай факты."""
 
 
-# === ОТЛАДКА ===
+# === ОТЛАДКА (отключается через DEBUG=0) ===
 @dp.update()
 async def debug_all_updates(update: Update):
     if DEBUG:
@@ -95,13 +95,17 @@ async def save_message_to_owner(message: Message):
     else:
         await bot.send_message(OWNER_ID, header)
         try:
-            await bot.copy_message(OWNER_ID, message.chat.id, message.message_id,
-                                   business_connection_id=message.business_connection_id)
+            await bot.copy_message(
+                OWNER_ID,
+                message.chat.id,
+                message.message_id,
+                business_connection_id=message.business_connection_id
+            )
         except Exception as e:
             logging.warning(f"⚠️ Не удалось скопировать медиа: {e}")
 
 
-# === ОСНОВНОЙ ОБРАБОТЧИК (для сообщений на твой аккаунт) ===
+# === ОСНОВНОЙ ОБРАБОТЧИК ===
 @dp.business_message(F.from_user.id != OWNER_ID)
 async def handle_business_message(message: Message):
     chat_id = message.chat.id
@@ -120,23 +124,34 @@ async def handle_business_message(message: Message):
     # Увеличиваем счётчик
     message_counter[chat_id] += 1
     
+    # ВАЖНО: message.answer() автоматически подставляет business_connection_id,
+    # поэтому НЕ передаём его явно!
+    
     # Первое сообщение — шаблонный ответ
     if message_counter[chat_id] == 1:
-        temp_msg = await message.answer("⏳ Обработка...",
-                                        business_connection_id=message.business_connection_id)
+        # Отправляем временное сообщение (без явного business_connection_id!)
+        temp_msg = await message.answer("⏳ Обработка...")
+        
         await asyncio.sleep(1.5)
-        await bot.delete_message(chat_id, temp_msg.message_id,
-                                 business_connection_id=message.business_connection_id)
-        await message.answer("✅ Ваше сообщение было доставлено, ожидайте ответ.",
-                             business_connection_id=message.business_connection_id)
+        
+        # Удаляем временное сообщение (здесь business_connection_id нужен явно)
+        await bot.delete_message(
+            chat_id=chat_id,
+            message_id=temp_msg.message_id,
+            business_connection_id=message.business_connection_id
+        )
+        
+        # Отправляем финальное (без явного business_connection_id!)
+        await message.answer("✅ Ваше сообщение было доставлено, ожидайте ответ.")
+        
         logging.info(f"📨 Шаблонный ответ для {sender_name}")
     
     # Повторные сообщения — подключаем ИИ
     else:
-        temp_msg = await message.answer("⏳ Думаю...",
-                                        business_connection_id=message.business_connection_id)
+        temp_msg = await message.answer("⏳ Думаю...")
         reply = await ask_groq(chat_id, user_text)
         
+        # Редактируем (здесь business_connection_id нужен явно)
         await bot.edit_message_text(
             chat_id=chat_id,
             message_id=temp_msg.message_id,
@@ -144,6 +159,17 @@ async def handle_business_message(message: Message):
             business_connection_id=message.business_connection_id
         )
         logging.info(f"🤖 Groq (Qwen) ответил {sender_name}")
+
+
+# === ЕСЛИ ВЛАДЕЛЕЦ САМ ОТВЕТИЛ — СБРАСЫВАЕМ СЧЁТЧИК ===
+@dp.business_message(F.from_user.id == OWNER_ID)
+async def handle_owner_message(message: Message):
+    if getattr(message, "sender_business_bot", None) is not None:
+        return
+    chat_id = message.chat.id
+    message_counter[chat_id] = 0
+    chat_history[chat_id].clear()
+    logging.info(f"🔁 Владелец вступил в диалог с чатом {chat_id} — счётчик сброшен")
 
 
 # === ЗАПУСК ===
