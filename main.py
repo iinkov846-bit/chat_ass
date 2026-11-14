@@ -41,7 +41,7 @@ SYSTEM_PROMPT = """Ты — дружелюбный и полезный асси�
 Не выдумывай факты."""
 
 
-# === ОТЛАДКА (отключается через DEBUG=0) ===
+# === ОТЛАДКА ===
 @dp.update()
 async def debug_all_updates(update: Update):
     if DEBUG:
@@ -95,10 +95,11 @@ async def save_message_to_owner(message: Message):
     else:
         await bot.send_message(OWNER_ID, header)
         try:
+            # Для медиа используем copy_message с business_connection_id
             await bot.copy_message(
-                OWNER_ID,
-                message.chat.id,
-                message.message_id,
+                chat_id=OWNER_ID,
+                from_chat_id=message.chat.id,
+                message_id=message.message_id,
                 business_connection_id=message.business_connection_id
             )
         except Exception as e:
@@ -124,24 +125,24 @@ async def handle_business_message(message: Message):
     # Увеличиваем счётчик
     message_counter[chat_id] += 1
     
-    # ВАЖНО: message.answer() автоматически подставляет business_connection_id,
-    # поэтому НЕ передаём его явно!
-    
     # Первое сообщение — шаблонный ответ
     if message_counter[chat_id] == 1:
-        # Отправляем временное сообщение (без явного business_connection_id!)
+        # Отправляем временное сообщение (business_connection_id подставляется автоматически)
         temp_msg = await message.answer("⏳ Обработка...")
         
         await asyncio.sleep(1.5)
         
-        # Удаляем временное сообщение (здесь business_connection_id нужен явно)
-        await bot.delete_message(
-            chat_id=chat_id,
-            message_id=temp_msg.message_id,
-            business_connection_id=message.business_connection_id
-        )
+        # Удаляем через delete_business_messages (правильный метод для бизнес-чатов)
+        try:
+            await bot.delete_business_messages(
+                business_connection_id=message.business_connection_id,
+                chat_id=chat_id,
+                message_ids=[temp_msg.message_id]
+            )
+        except Exception as e:
+            logging.warning(f"⚠️ Не удалось удалить временное сообщение: {e}")
         
-        # Отправляем финальное (без явного business_connection_id!)
+        # Отправляем финальное
         await message.answer("✅ Ваше сообщение было доставлено, ожидайте ответ.")
         
         logging.info(f"📨 Шаблонный ответ для {sender_name}")
@@ -151,7 +152,7 @@ async def handle_business_message(message: Message):
         temp_msg = await message.answer("⏳ Думаю...")
         reply = await ask_groq(chat_id, user_text)
         
-        # Редактируем (здесь business_connection_id нужен явно)
+        # Редактируем через edit_message_text с business_connection_id
         await bot.edit_message_text(
             chat_id=chat_id,
             message_id=temp_msg.message_id,
