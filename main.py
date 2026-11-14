@@ -12,11 +12,15 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 # === ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ ===
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+OWNER_ID_RAW = os.getenv("OWNER_ID")
+
 GROQ_BASE_URL = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "qwen/qwen3-32b")
 
-if not BOT_TOKEN or not GROQ_API_KEY:
-    raise ValueError("Задай BOT_TOKEN и GROQ_API_KEY в Railway Variables!")
+if not BOT_TOKEN or not GROQ_API_KEY or not OWNER_ID_RAW:
+    raise ValueError("Задай BOT_TOKEN, GROQ_API_KEY и OWNER_ID в Railway Variables!")
+
+OWNER_ID = int(OWNER_ID_RAW)
 
 # === ИНИЦИАЛИЗАЦИЯ ===
 bot = Bot(token=BOT_TOKEN)
@@ -43,10 +47,8 @@ SYSTEM_PROMPT = """Ты — дружелюбный и полезный асси�
 # === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===
 
 async def ask_groq(chat_id: int, user_message: str) -> str:
-    """Отправляет запрос в Groq (Qwen3-32B) с учётом истории."""
+    """Отправляет запрос в Groq (Qwen3-32B) с учётом истории. При ошибке — fallback."""
     chat_history[chat_id].append({"role": "user", "content": user_message})
-    
-    # Обрезаем историю до CONTEXT_SIZE
     history = chat_history[chat_id][-CONTEXT_SIZE:]
     
     messages = [
@@ -65,7 +67,31 @@ async def ask_groq(chat_id: int, user_message: str) -> str:
         return reply
     except Exception as e:
         logging.error(f"❌ Ошибка Groq API: {e}")
-        return "Извините, произошла ошибка. Попробуйте позже."
+        # Сбрасываем историю при ошибке, чтобы не копилась
+        chat_history[chat_id].clear()
+        return "⚠️ Извините, сейчас я недоступен. Попробуйте позже."
+
+
+async def save_message_to_owner(message: Message):
+    """Пересылает сообщение владельцу бота."""
+    sender = message.from_user
+    username = f"@{sender.username}" if sender.username else "без username"
+    
+    header = (
+        "📥 Новое сообщение боту\n"
+        f"👤 От: {sender.full_name} ({username})\n"
+        f"🆔 ID: {sender.id}"
+    )
+    
+    if message.text:
+        await bot.send_message(OWNER_ID, f"{header}\n\n💬 Текст:\n{message.text}")
+    else:
+        # Для медиа отправляем заголовок + копируем сообщение
+        await bot.send_message(OWNER_ID, header)
+        try:
+            await bot.copy_message(OWNER_ID, message.chat.id, message.message_id)
+        except Exception as e:
+            logging.warning(f"⚠️ Не удалось скопировать медиа: {e}")
 
 
 # === ОБРАБОТЧИК СООБЩЕНИЙ ===
@@ -77,6 +103,12 @@ async def handle_message(message: Message):
     
     if not user_text:
         return  # Игнорируем пустые/медиа сообщения
+    
+    # Пересылаем сообщение владельцу
+    try:
+        await save_message_to_owner(message)
+    except Exception as e:
+        logging.error(f"❌ Не удалось переслать владельцу: {e}")
     
     # Увеличиваем счётчик
     message_counter[chat_id] += 1
@@ -108,6 +140,7 @@ async def main():
     logging.info("🚀 Запуск бота с Groq (Qwen3-32B)...")
     logging.info(f"🧠 Модель: {GROQ_MODEL}")
     logging.info(f"🔗 Эндпоинт: {GROQ_BASE_URL}")
+    logging.info(f"👑 Владелец: {OWNER_ID}")
     await dp.start_polling(bot)
 
 
