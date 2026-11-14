@@ -16,7 +16,8 @@ OWNER_ID_RAW = os.getenv("OWNER_ID")
 DEBUG = os.getenv("DEBUG", "0") == "1"
 
 GROQ_BASE_URL = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
-GROQ_MODEL = os.getenv("GROQ_MODEL", "qwen/qwen3-32b")
+# Используем Llama 3.3 70B (бесплатная, быстрая и умная) или qwen-2.5-32b
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
 if not BOT_TOKEN or not GROQ_API_KEY or not OWNER_ID_RAW:
     raise ValueError("Задай BOT_TOKEN, GROQ_API_KEY и OWNER_ID в Railway Variables!")
@@ -77,7 +78,7 @@ async def ask_groq(chat_id: int, user_message: str) -> str:
     except Exception as e:
         logging.error(f"❌ Ошибка Groq API: {e}")
         chat_history[chat_id].clear()
-        return "⚠️ Извините, сейчас я недоступен. Попробуйте позже."
+        return "⚠️ Извините, AI Groq сейчас недоступен. Попробуйте позже."
 
 
 async def save_message_to_owner(message: Message):
@@ -95,7 +96,6 @@ async def save_message_to_owner(message: Message):
     else:
         await bot.send_message(OWNER_ID, header)
         try:
-            # Для медиа используем copy_message с business_connection_id
             await bot.copy_message(
                 chat_id=OWNER_ID,
                 from_chat_id=message.chat.id,
@@ -127,23 +127,18 @@ async def handle_business_message(message: Message):
     
     # Первое сообщение — шаблонный ответ
     if message_counter[chat_id] == 1:
-        # Отправляем временное сообщение (business_connection_id подставляется автоматически)
+        # Отправляем временное сообщение
         temp_msg = await message.answer("⏳ Обработка...")
         
         await asyncio.sleep(1.5)
         
-        # Удаляем через delete_business_messages (правильный метод для бизнес-чатов)
-        try:
-            await bot.delete_business_messages(
-                business_connection_id=message.business_connection_id,
-                chat_id=chat_id,
-                message_ids=[temp_msg.message_id]
-            )
-        except Exception as e:
-            logging.warning(f"⚠️ Не удалось удалить временное сообщение: {e}")
-        
-        # Отправляем финальное
-        await message.answer("✅ Ваше сообщение было доставлено, ожидайте ответ.")
+        # Вместо удаления просто РЕДАКТИРУЕМ сообщение (это надёжнее и красивее)
+        await bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=temp_msg.message_id,
+            text="✅ Ваше сообщение было доставлено, ожидайте ответ.",
+            business_connection_id=message.business_connection_id
+        )
         
         logging.info(f"📨 Шаблонный ответ для {sender_name}")
     
@@ -152,14 +147,13 @@ async def handle_business_message(message: Message):
         temp_msg = await message.answer("⏳ Думаю...")
         reply = await ask_groq(chat_id, user_text)
         
-        # Редактируем через edit_message_text с business_connection_id
         await bot.edit_message_text(
             chat_id=chat_id,
             message_id=temp_msg.message_id,
             text=reply,
             business_connection_id=message.business_connection_id
         )
-        logging.info(f"🤖 Groq (Qwen) ответил {sender_name}")
+        logging.info(f"🤖 ИИ ответил {sender_name}")
 
 
 # === ЕСЛИ ВЛАДЕЛЕЦ САМ ОТВЕТИЛ — СБРАСЫВАЕМ СЧЁТЧИК ===
@@ -175,7 +169,7 @@ async def handle_owner_message(message: Message):
 
 # === ЗАПУСК ===
 async def main():
-    logging.info("🚀 Запуск бизнес-бота с Groq (Qwen3-32B)...")
+    logging.info("🚀 Запуск бизнес-бота с Groq...")
     logging.info(f"🧠 Модель: {GROQ_MODEL}")
     logging.info(f"👑 Владелец: {OWNER_ID}")
     
