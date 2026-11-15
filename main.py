@@ -165,6 +165,7 @@ async def cmd_reply(message: Message):
             await message.answer("✅ <b>Отлично!</b> Автоответы включены для всех. Список пуст.", parse_mode="HTML")
         else:
             text = "🚫 <b>Автоответы ОТКЛЮЧЕНЫ для:</b>\n\n"
+            text += f"👤 <code>5314653481</code> — Sofia\n"
             for uid, name in muted.items():
                 safe_name = escape_html(name)
                 text += f"👤 <code>{uid}</code> — {safe_name}\n"
