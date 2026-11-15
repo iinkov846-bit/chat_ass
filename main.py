@@ -17,7 +17,7 @@ OWNER_ID_RAW = os.getenv("OWNER_ID")
 DEBUG = os.getenv("DEBUG", "0") == "1"
 
 GROQ_BASE_URL = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
-GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b") # Или qwen/qwen3.8-27b
+GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 
 if not BOT_TOKEN or not GROQ_API_KEY or not OWNER_ID_RAW:
     raise ValueError("Задай BOT_TOKEN, GROQ_API_KEY и OWNER_ID в Railway Variables!")
@@ -36,6 +36,7 @@ CONTEXT_SIZE = 10
 
 message_counter = defaultdict(int)
 chat_history = defaultdict(list)
+processed_updates = set()  # Для защиты от дублирования
 
 SYSTEM_PROMPT = """Ты — дружелюбный и полезный ассистент. 
 Отвечай кратко и по делу на русском языке.
@@ -74,29 +75,41 @@ async def handle_business_connection(connection: BusinessConnection):
 @dp.message(F.text.startswith("/reply"))
 @dp.business_message(F.text.startswith("/reply"))
 async def cmd_reply(message: Message):
+    # Защита от дублирования
+    update_id = message.update_id
+    if update_id in processed_updates:
+        return
+    processed_updates.add(update_id)
+    
+    # Очистка старых ID (оставляем последние 1000)
+    if len(processed_updates) > 1000:
+        processed_updates.clear()
+    
     if message.from_user.id != OWNER_ID:
-        return  # Игнорируем, если не владелец
+        return
     
     parts = message.text.split()
     if len(parts) < 2:
         await message.answer(
-            "📋 **Управление автоответами:**\n\n"
+            "📋 <b>Управление автоответами:</b>\n\n"
             "/reply <user_id> — переключить статус (Вкл/Выкл)\n"
             "/reply list — показать список отключенных\n\n"
-            "💡 *ID пользователя можно взять из пересланного сообщения.*",
-            parse_mode="Markdown"
+            "💡 <i>ID пользователя можно взять из пересланного сообщения.</i>",
+            parse_mode="HTML"
         )
         return
 
     if parts[1].lower() == "list":
         muted = load_muted_users()
         if not muted:
-            await message.answer("✅ Автоответы **включены** для всех пользователей. Список пуст.")
+            await message.answer("✅ Автоответы <b>включены</b> для всех пользователей. Список пуст.", parse_mode="HTML")
         else:
-            text = "🚫 **Автоответы ОТКЛЮЧЕНЫ для:**\n\n"
+            text = "🚫 <b>Автоответы ОТКЛЮЧЕНЫ для:</b>\n\n"
             for uid, name in muted.items():
-                text += f"• `{uid}` — {name}\n"
-            await message.answer(text, parse_mode="Markdown")
+                # Экранируем специальные HTML-символы
+                safe_name = name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                text += f"• <code>{uid}</code> — {safe_name}\n"
+            await message.answer(text, parse_mode="HTML")
         return
 
     target_id_str = parts[1]
@@ -109,12 +122,14 @@ async def cmd_reply(message: Message):
     str_id = str(target_id)
 
     if str_id in muted:
-        # Если уже в списке — удаляем (включаем ответы)
         name = muted.pop(str_id)
         save_muted_users(muted)
-        await message.answer(f"✅ Автоответы для **{name}** (`{target_id}`) теперь **ВКЛЮЧЕНЫ**.")
+        safe_name = name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        await message.answer(
+            f"✅ Автоответы для <b>{safe_name}</b> (<code>{target_id}</code>) теперь <b>ВКЛЮЧЕНЫ</b>.",
+            parse_mode="HTML"
+        )
     else:
-        # Если нет в списке — добавляем (выключаем ответы)
         try:
             chat = await bot.get_chat(target_id)
             name = chat.full_name or "Неизвестный пользователь"
@@ -123,7 +138,12 @@ async def cmd_reply(message: Message):
         
         muted[str_id] = name
         save_muted_users(muted)
-        await message.answer(f"🚫 Автоответы для **{name}** (`{target_id}`) теперь **ВЫКЛЮЧЕНЫ**.\nБот будет только пересылать его сообщения.")
+        safe_name = name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        await message.answer(
+            f"🚫 Автоответы для <b>{safe_name}</b> (<code>{target_id}</code>) теперь <b>ВЫКЛЮЧЕНЫ</b>.\n"
+            f"Бот будет только пересылать его сообщения.",
+            parse_mode="HTML"
+        )
 
 
 # === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===
@@ -177,6 +197,12 @@ async def save_message_to_owner(message: Message):
 # === ОСНОВНОЙ ОБРАБОТЧИК ===
 @dp.business_message(F.from_user.id != OWNER_ID)
 async def handle_business_message(message: Message):
+    # Защита от дублирования
+    update_id = message.update_id
+    if update_id in processed_updates:
+        return
+    processed_updates.add(update_id)
+    
     chat_id = message.chat.id
     sender_name = message.from_user.first_name or "Друг"
     user_text = message.text or ""
@@ -194,7 +220,7 @@ async def handle_business_message(message: Message):
     muted = load_muted_users()
     if str(chat_id) in muted:
         logging.info(f"🔇 Автоответ отключен для {sender_name} ({chat_id}), только пересылка")
-        return  # Прерываем функцию, бот НЕ будет отвечать
+        return
 
     # 3. Логика автоответов (если не в списке muted)
     message_counter[chat_id] += 1
@@ -227,6 +253,13 @@ async def handle_business_message(message: Message):
 async def handle_owner_message(message: Message):
     if getattr(message, "sender_business_bot", None) is not None:
         return
+    
+    # Защита от дублирования
+    update_id = message.update_id
+    if update_id in processed_updates:
+        return
+    processed_updates.add(update_id)
+    
     chat_id = message.chat.id
     message_counter[chat_id] = 0
     chat_history[chat_id].clear()
