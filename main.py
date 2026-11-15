@@ -48,7 +48,6 @@ SYSTEM_PROMPT = """Ты — дерзкий, грубый и крайне нет�
 
 # === БЕЗОПАСНОСТЬ HTML ===
 def escape_html(text: str) -> str:
-    """Экранирует спецсимволы, чтобы Telegram не выдавал ошибку парсинга."""
     if not text:
         return ""
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -139,6 +138,7 @@ async def cmd_help(message: Message):
 @dp.message(F.text.startswith("/reply"))
 @dp.business_message(F.text.startswith("/reply"))
 async def cmd_reply(message: Message):
+    # ВАЖНО: используем (chat.id, message_id), а НЕ message.update_id!
     msg_key = (message.chat.id, message.message_id)
     if msg_key in processed_messages:
         return
@@ -229,7 +229,6 @@ async def ask_groq(chat_id: int, user_message: str) -> str:
 
 
 async def save_message_to_owner(message: Message):
-    """Пересылает сообщение владельцу в точном запрошенном формате."""
     sender = message.from_user
     username = f"@{sender.username}" if sender.username else "нет"
     now = datetime.now().strftime("%d.%m.%Y %H:%M")
@@ -274,19 +273,16 @@ async def handle_business_message(message: Message):
     if not user_text:
         return
     
-    # 1. ВСЕГДА пересылаем сообщение владельцу
     try:
         await save_message_to_owner(message)
     except Exception as e:
         logging.error(f"❌ Не удалось переслать владельцу: {e}")
     
-    # 2. Проверяем, отключены ли автоответы
     muted = load_muted_users()
     if str(chat_id) in muted:
         logging.info(f"🔇 Автоответ отключен для {sender_name} ({chat_id}), только пересылка")
         return
 
-    # 3. Логика автоответов
     message_counter[chat_id] += 1
     
     if message_counter[chat_id] == 1:
@@ -313,7 +309,7 @@ async def handle_business_message(message: Message):
         logging.info(f"🤖 ИИ ответил {sender_name}")
 
 
-# === СБРОС СЧЁТЧИКА, ЕСЛИ ВЛАДЕЛЕЦ ОТВЕТИЛ САМ ===
+# === СБРОС СЧЁТЧИКА ===
 @dp.business_message(F.from_user.id == OWNER_ID)
 async def handle_owner_message(message: Message):
     if getattr(message, "sender_business_bot", None) is not None:
@@ -332,7 +328,7 @@ async def handle_owner_message(message: Message):
 
 # === ЗАПУСК ===
 async def main():
-    logging.info("🚀 Запуск бизнес-бота с Groq и красивым интерфейсом...")
+    logging.info("🚀 Запуск бизнес-бота с Groq и дерзким ИИ...")
     logging.info(f"🧠 Модель: {GROQ_MODEL}")
     logging.info(f"👑 Владелец: {OWNER_ID}")
     
