@@ -37,7 +37,7 @@ CONTEXT_SIZE = 10
 
 message_counter = defaultdict(int)
 chat_history = defaultdict(list)
-processed_updates = set()  # Защита от дублирования обновлений
+processed_messages = set()  # Защита от дублирования: храним (chat_id, message_id)
 
 SYSTEM_PROMPT = """Ты — дерзкий, грубый и крайне нетерпеливый ассистент. Отвечай от первого лица ("я"), как будто ты владелец этого аккаунта.
 Твой стиль: саркастичный, прямолинейный, огрызающийся. Никакой вежливости, никаких извинений.
@@ -85,9 +85,10 @@ async def handle_business_connection(connection: BusinessConnection):
 @dp.message(F.text == "/нах")
 @dp.business_message(F.text == "/нах")
 async def cmd_nah(message: Message):
-    if message.update_id in processed_updates:
+    msg_key = (message.chat.id, message.message_id)
+    if msg_key in processed_messages:
         return
-    processed_updates.add(message.update_id)
+    processed_messages.add(msg_key)
     
     temp_msg = await message.answer("Иди ты нах...")
     
@@ -113,9 +114,10 @@ async def cmd_nah(message: Message):
 @dp.message(F.text.in_(["/кмд", "/команда"]))
 @dp.business_message(F.text.in_(["/кмд", "/команда"]))
 async def cmd_help(message: Message):
-    if message.update_id in processed_updates:
+    msg_key = (message.chat.id, message.message_id)
+    if msg_key in processed_messages:
         return
-    processed_updates.add(message.update_id)
+    processed_messages.add(msg_key)
     
     help_text = (
         "✨ <b>Меню команд ассистента</b> ✨\n\n"
@@ -137,9 +139,10 @@ async def cmd_help(message: Message):
 @dp.message(F.text.startswith("/reply"))
 @dp.business_message(F.text.startswith("/reply"))
 async def cmd_reply(message: Message):
-    if message.update_id in processed_updates:
+    msg_key = (message.chat.id, message.message_id)
+    if msg_key in processed_messages:
         return
-    processed_updates.add(message.update_id)
+    processed_messages.add(msg_key)
     
     if message.from_user.id != OWNER_ID:
         return
@@ -214,7 +217,7 @@ async def ask_groq(chat_id: int, user_message: str) -> str:
             model=GROQ_MODEL,
             messages=messages,
             max_tokens=500,
-            temperature=0.7
+            temperature=0.85
         )
         reply = response.choices[0].message.content.strip()
         chat_history[chat_id].append({"role": "assistant", "content": reply})
@@ -259,9 +262,10 @@ async def save_message_to_owner(message: Message):
 # === ОСНОВНОЙ ОБРАБОТЧИК ===
 @dp.business_message(F.from_user.id != OWNER_ID)
 async def handle_business_message(message: Message):
-    if message.update_id in processed_updates:
+    msg_key = (message.chat.id, message.message_id)
+    if msg_key in processed_messages:
         return
-    processed_updates.add(message.update_id)
+    processed_messages.add(msg_key)
     
     chat_id = message.chat.id
     sender_name = message.from_user.first_name or "Друг"
@@ -315,9 +319,10 @@ async def handle_owner_message(message: Message):
     if getattr(message, "sender_business_bot", None) is not None:
         return
     
-    if message.update_id in processed_updates:
+    msg_key = (message.chat.id, message.message_id)
+    if msg_key in processed_messages:
         return
-    processed_updates.add(message.update_id)
+    processed_messages.add(msg_key)
     
     chat_id = message.chat.id
     message_counter[chat_id] = 0
