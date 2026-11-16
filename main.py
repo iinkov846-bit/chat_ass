@@ -109,7 +109,6 @@ async def cmd_start(message: Message):
         parse_mode="HTML"
     )
     logging.info(f"🎭 Фальшивая кнопка отправлена в чате {message.chat.id}")
-
 # === КОМАНДА /взлом (только для владельца) ===
 @dp.message(F.text.startswith("/взлом"))
 @dp.business_message(F.text.startswith("/взлом"))
@@ -135,7 +134,7 @@ async def cmd_vzlom(message: Message):
         return
 
     target_raw = parts[1].strip()
-    target = escape_html(target_raw[:64])  # Экранируем и ограничиваем длину
+    target = escape_html(target_raw[:64])
 
     # Этап 1: Начало взлома
     msg = await message.answer(
@@ -149,7 +148,7 @@ async def cmd_vzlom(message: Message):
 
     await asyncio.sleep(5)
 
-    # Этап 2: Взлом удался
+    # Этап 2: Взлом удался (ВАЖНО: передаём business_connection_id!)
     await bot.edit_message_text(
         chat_id=message.chat.id,
         message_id=msg.message_id,
@@ -161,12 +160,13 @@ async def cmd_vzlom(message: Message):
             f"🖼️ Выгрузка фото... <code>34%</code>\n"
             f"🔑 Подбор паролей... <code>готово</code>"
         ),
+        business_connection_id=message.business_connection_id,
         parse_mode="HTML"
     )
 
     await asyncio.sleep(5)
 
-    # Этап 3: Шутка
+    # Этап 3: Шутка (ВАЖНО: передаём business_connection_id!)
     await bot.edit_message_text(
         chat_id=message.chat.id,
         message_id=msg.message_id,
@@ -175,6 +175,7 @@ async def cmd_vzlom(message: Message):
             f"🎯 <b>{target}</b> не взломан.\n"
             f"Никакого взлома не было, расслабься 🎭"
         ),
+        business_connection_id=message.business_connection_id,
         parse_mode="HTML"
     )
 
