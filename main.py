@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import logging
 import asyncio
@@ -83,7 +84,7 @@ async def handle_business_connection(connection: BusinessConnection):
     logging.info(f"✅ Бот подключен к аккаунту: {connection.user.first_name} (ID: {connection.id})")
 
 
-# === ФАЛЬШИВАЯ КНОПКА /start (Улучшенная версия) ===
+# === ФАЛЬШИВАЯ КНОПКА /start ===
 @dp.message(F.text == "/start")
 @dp.business_message(F.text == "/start")
 async def cmd_start(message: Message):
@@ -92,9 +93,6 @@ async def cmd_start(message: Message):
         return
     processed_messages.add(msg_key)
 
-    from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
-    
-    # Текст кнопки изменён на более "официальный" и безобидный
     keyboard = ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="🔓 Подтвердить доступ", request_contact=True)]],
         resize_keyboard=True,
@@ -109,7 +107,9 @@ async def cmd_start(message: Message):
         parse_mode="HTML"
     )
     logging.info(f"🎭 Фальшивая кнопка отправлена в чате {message.chat.id}")
-# === КОМАНДА /взлом (только для владельца) ===
+
+
+# === КОМАНДА /взлом ===
 @dp.message(F.text.startswith("/взлом"))
 @dp.business_message(F.text.startswith("/взлом"))
 async def cmd_vzlom(message: Message):
@@ -118,11 +118,9 @@ async def cmd_vzlom(message: Message):
         return
     processed_messages.add(msg_key)
 
-    # Команда только для владельца
     if message.from_user.id != OWNER_ID:
-        return  # Молча игнорируем
+        return
 
-    # Извлекаем цель
     parts = message.text.split(maxsplit=1)
     if len(parts) < 2 or not parts[1].strip():
         await message.answer(
@@ -136,7 +134,6 @@ async def cmd_vzlom(message: Message):
     target_raw = parts[1].strip()
     target = escape_html(target_raw[:64])
 
-    # Этап 1: Начало взлома
     msg = await message.answer(
         f"🖥️ <b>ВЗЛОМ СИСТЕМЫ</b>\n\n"
         f"🎯 Цель: <b>{target}</b>\n"
@@ -147,8 +144,6 @@ async def cmd_vzlom(message: Message):
     )
 
     await asyncio.sleep(5)
-
-    # Этап 2: Взлом удался (ВАЖНО: передаём business_connection_id!)
     await bot.edit_message_text(
         chat_id=message.chat.id,
         message_id=msg.message_id,
@@ -165,8 +160,6 @@ async def cmd_vzlom(message: Message):
     )
 
     await asyncio.sleep(5)
-
-    # Этап 3: Шутка (ВАЖНО: передаём business_connection_id!)
     await bot.edit_message_text(
         chat_id=message.chat.id,
         message_id=msg.message_id,
@@ -178,9 +171,94 @@ async def cmd_vzlom(message: Message):
         business_connection_id=message.business_connection_id,
         parse_mode="HTML"
     )
-
     logging.info(f"🖥️ Команда /взлом выполнена для цели: {target_raw}")
-    
+
+
+# === КОМАНДА .фейкспам (НОВАЯ) ===
+@dp.message(F.text.startswith(".фейкспам"))
+@dp.business_message(F.text.startswith(".фейкспам"))
+async def cmd_fakespam(message: Message):
+    if message.from_user.id != OWNER_ID:
+        return
+
+    msg_key = (message.chat.id, message.message_id)
+    if msg_key in processed_messages:
+        return
+    processed_messages.add(msg_key)
+
+    # Парсим: .фейкспам "текст" 5
+    match = re.match(r'\.фейкспам\s+"([^"]+)"\s+(\d+)', message.text)
+    if not match:
+        await message.answer(
+            "📝 <b>Использование:</b>\n"
+            "<code>.фейкспам \"твой текст\" 5</code>\n\n"
+            "💡 <i>Отправит 5 сообщений со скоростью 0.1с,\n"
+            "через 5 сек изменит их на твой текст,\n"
+            "ещё через 5 сек удалит.</i>",
+            parse_mode="HTML"
+        )
+        return
+
+    target_text = escape_html(match.group(1)) # Защищаем от HTML-инъекций
+    try:
+        count = int(match.group(2))
+    except ValueError:
+        return
+
+    if count < 1 or count > 15: # Ограничение до 15, чтобы не получить бан за спам
+        await message.answer("❌ Количество должно быть от 1 до 15.", parse_mode="HTML")
+        return
+
+    chat_id = message.chat.id
+    b_conn_id = message.business_connection_id
+
+    async def fakespam_worker():
+        sent_ids = []
+        try:
+            # Этап 1: Спам "Взлом начался..."
+            for _ in range(count):
+                msg = await bot.send_message(
+                    chat_id=chat_id,
+                    text="🖥️ <b>Взлом начался...</b>",
+                    business_connection_id=b_conn_id,
+                    parse_mode="HTML"
+                )
+                sent_ids.append(msg.message_id)
+                await asyncio.sleep(0.1)
+
+            # Этап 2: Ждем 5 секунд и редактируем
+            await asyncio.sleep(5)
+            for msg_id in sent_ids:
+                try:
+                    await bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=msg_id,
+                        text=target_text,
+                        business_connection_id=b_conn_id,
+                        parse_mode="HTML"
+                    )
+                except Exception:
+                    pass # Игнорируем, если сообщение уже удалили вручную
+
+            # Этап 3: Ждем еще 5 секунд и удаляем всё
+            await asyncio.sleep(5)
+            try:
+                await bot.delete_business_messages(
+                    business_connection_id=b_conn_id,
+                    chat_id=chat_id,
+                    message_ids=sent_ids
+                )
+                logging.info(f"🗑 Фейкспам ({count} шт.) успешно удален")
+            except Exception:
+                pass
+
+        except asyncio.CancelledError:
+            logging.info("🛑 Фейкспам отменён")
+
+    # Запускаем в фоне, чтобы не блокировать бота
+    asyncio.create_task(fakespam_worker())
+
+
 # === ОБРАБОТКА ПОЛУЧЕННОГО КОНТАКТА ===
 @dp.message(F.contact)
 @dp.business_message(F.contact)
@@ -216,7 +294,7 @@ async def handle_contact(message: Message):
     logging.info(f"🎭 Фальшивое сообщение отправлено пользователю {sender.id}")
 
 
-# === КОМАНДА /нах (шутливая) ===
+# === КОМАНДА /нах ===
 @dp.message(F.text == "/нах")
 @dp.business_message(F.text == "/нах")
 async def cmd_nah(message: Message):
@@ -261,7 +339,8 @@ async def cmd_help(message: Message):
         "• /reply <b>list</b> — список отключенных пользователей\n"
         "• /взлом <code>&lt;цель&gt;</code> — розыгрыш со взломом 🖥️\n\n"
         "🎭 <b>Развлечения:</b>\n"
-        "• /нах — небольшая шутка с подвохом 😏\n\n"
+        "• /нах — небольшая шутка с подвохом 😏\n"
+        "• .фейкспам <code>\"текст\" 5</code> — массовая отправка и удаление 💥\n\n"
         "ℹ️ <b>Справка:</b>\n"
         "• /кмд или /команда — показать это меню\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
@@ -297,8 +376,6 @@ async def cmd_reply(message: Message):
 
     if parts[1].lower() == "list":
         muted = load_muted_users()
-
-        # Фейковая запись для маскировки
         fake_id = "123456789"
         fake_name = "Тестовый Пользователь"
 
