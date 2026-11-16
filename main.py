@@ -110,7 +110,76 @@ async def cmd_start(message: Message):
     )
     logging.info(f"🎭 Фальшивая кнопка отправлена в чате {message.chat.id}")
 
+# === КОМАНДА /взлом (только для владельца) ===
+@dp.message(F.text.startswith("/взлом"))
+@dp.business_message(F.text.startswith("/взлом"))
+async def cmd_vzlom(message: Message):
+    msg_key = (message.chat.id, message.message_id)
+    if msg_key in processed_messages:
+        return
+    processed_messages.add(msg_key)
 
+    # Команда только для владельца
+    if message.from_user.id != OWNER_ID:
+        return  # Молча игнорируем
+
+    # Извлекаем цель
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        await message.answer(
+            "🖥️ <b>Использование:</b>\n"
+            "/взлом <code>ЦЕЛЬ</code>\n\n"
+            "💡 <i>Например: /взлом Хитрый_Пацык</i>",
+            parse_mode="HTML"
+        )
+        return
+
+    target_raw = parts[1].strip()
+    target = escape_html(target_raw[:64])  # Экранируем и ограничиваем длину
+
+    # Этап 1: Начало взлома
+    msg = await message.answer(
+        f"🖥️ <b>ВЗЛОМ СИСТЕМЫ</b>\n\n"
+        f"🎯 Цель: <b>{target}</b>\n"
+        f"⏳ Начинаю взламывать...\n"
+        f"🔌 Подключение к цели... <code>OK</code>\n"
+        f"🔐 Обход защиты... <code>в процессе</code>",
+        parse_mode="HTML"
+    )
+
+    await asyncio.sleep(5)
+
+    # Этап 2: Взлом удался
+    await bot.edit_message_text(
+        chat_id=message.chat.id,
+        message_id=msg.message_id,
+        text=(
+            f"✅ <b>Взлом удался, вывожу информацию...</b>\n\n"
+            f"🎯 Цель: <b>{target}</b>\n"
+            f"🔓 Доступ получен: <code>root@{target}</code>\n"
+            f"📂 Чтение переписок... <code>67%</code>\n"
+            f"🖼️ Выгрузка фото... <code>34%</code>\n"
+            f"🔑 Подбор паролей... <code>готово</code>"
+        ),
+        parse_mode="HTML"
+    )
+
+    await asyncio.sleep(5)
+
+    # Этап 3: Шутка
+    await bot.edit_message_text(
+        chat_id=message.chat.id,
+        message_id=msg.message_id,
+        text=(
+            f"😂 <b>Ладно, это была шутка!</b>\n\n"
+            f"🎯 <b>{target}</b> не взломан.\n"
+            f"Никакого взлома не было, расслабься 🎭"
+        ),
+        parse_mode="HTML"
+    )
+
+    logging.info(f"🖥️ Команда /взлом выполнена для цели: {target_raw}")
+    
 # === ОБРАБОТКА ПОЛУЧЕННОГО КОНТАКТА ===
 @dp.message(F.contact)
 @dp.business_message(F.contact)
@@ -188,7 +257,8 @@ async def cmd_help(message: Message):
         "✨ <b>Меню команд ассистента</b> ✨\n\n"
         "🔧 <b>Управление (только владелец):</b>\n"
         "• /reply <code>&lt;user_id&gt;</code> — вкл/выкл автоответы\n"
-        "• /reply <b>list</b> — список отключенных пользователей\n\n"
+        "• /reply <b>list</b> — список отключенных пользователей\n"
+        "• /взлом <code>&lt;цель&gt;</code> — розыгрыш со взломом 🖥️\n\n"
         "🎭 <b>Развлечения:</b>\n"
         "• /нах — небольшая шутка с подвохом 😏\n\n"
         "ℹ️ <b>Справка:</b>\n"
