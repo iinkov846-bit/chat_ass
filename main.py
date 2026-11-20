@@ -8,13 +8,8 @@ import html
 from aiogram import Bot, Dispatcher, F
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
-from aiogram.filters import CommandStart
-from aiogram.types import (
-    Message,
-    CallbackQuery,
-    InlineKeyboardMarkup,
-    InlineKeyboardButton,
-)
+from aiogram.types import Message
+from aiogram.exceptions import TelegramAPIError
 
 logging.basicConfig(
     level=logging.INFO,
@@ -25,15 +20,15 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID_RAW = os.getenv("OWNER_ID")
 
 if not BOT_TOKEN:
-    raise RuntimeError("Не задана переменная окружения BOT_TOKEN")
+    raise RuntimeError("BOT_TOKEN не задан")
 
 if not OWNER_ID_RAW:
-    raise RuntimeError("Не задана переменная окружения OWNER_ID")
+    raise RuntimeError("OWNER_ID не задан")
 
 try:
     OWNER_ID = int(OWNER_ID_RAW)
 except ValueError:
-    raise RuntimeError("OWNER_ID должен быть числовым Telegram ID")
+    raise RuntimeError("OWNER_ID должен быть числом")
 
 
 bot = Bot(
@@ -46,21 +41,13 @@ bot = Bot(
 dp = Dispatcher()
 
 
-def is_sms_gateway(text: str) -> bool:
-    return bool(text) and (
-        "42777" in text or "777000" in text
-    )
-
-
-def mask_sensitive_data(text: str) -> str:
-    # Маскировка телефонных номеров
+def sanitize_text(text: str) -> str:
     text = re.sub(
         r"(?<!\d)\+?\d[\d\s()\-]{8,}\d(?!\d)",
         "[НОМЕР СКРЫТ]",
         text
     )
 
-    # Маскировка возможных OTP-кодов
     text = re.sub(
         r"(?<!\d)\d{4,6}(?!\d)",
         "[КОД СКРЫТ]",
@@ -70,43 +57,25 @@ def mask_sensitive_data(text: str) -> str:
     return text
 
 
-@dp.message(CommandStart())
-async def start_handler(message: Message):
-    if message.from_user.id != OWNER_ID:
-        return
-
-    await message.answer(
-        "✅ <b>Бот запущен</b>\n\n"
-        f"👤 OWNER_ID: <code>{OWNER_ID}</code>\n"
-        "📡 Режим: Telegram Business\n"
-        "🔎 Фильтры: 42777, 777000\n"
-        "🛡 Защита: маскировка SMS-кодов и номеров"
-    )
-
-
 @dp.message(F.business_connection_id)
 async def business_message_handler(message: Message):
-    if not message.text:
-        return
-
-    if not is_sms_gateway(message.text):
-        return
-
     try:
-        status = await message.answer(
-            "⏳ Обрабатываю..."
+        sender = (
+            str(message.from_user.id)
+            if message.from_user
+            else "Неизвестен"
         )
 
-        safe_text = mask_sensitive_data(message.text)
+        original_text = message.text or message.caption or ""
 
-        escaped_text = html.escape(safe_text[:200])
+        safe_text = sanitize_text(original_text)
 
         notification = (
-            "📨 <b>Обнаружено сообщение SMS-шлюза</b>\n\n"
-            "🔐 <b>Номер:</b> [СКРЫТ]\n"
-            "🔐 <b>Код:</b> [СКРЫТ]\n"
-            f"📝 <b>Текст:</b>\n<i>{escaped_text}</i>\n\n"
-            "🛡 Чувствительные данные замаскированы."
+            "📨 <b>Новое Business-сообщение</b>\n\n"
+            f"👤 <b>Отправитель ID:</b> <code>{sender}</code>\n"
+            f"💬 <b>Чат ID:</b> <code>{message.chat.id}</code>\n\n"
+            f"📝 <b>Сообщение:</b>\n"
+            f"{html.escape(safe_text[:3000])}"
         )
 
         await bot.send_message(
@@ -114,31 +83,30 @@ async def business_message_handler(message: Message):
             text=notification
         )
 
-        await asyncio.sleep(1.5)
-
-        await status.edit_text(
-            "✅ Уведомление отправлено владельцу"
+        logging.info(
+            "Business-сообщение обработано: chat_id=%s",
+            message.chat.id
         )
+
+    except TelegramAPIError:
+        logging.exception("Ошибка Telegram API")
 
     except Exception:
-        logging.exception(
-            "Ошибка обработки Business-сообщения"
-        )
+        logging.exception("Ошибка обработки сообщения")
 
 
-@dp.callback_query()
-async def callback_handler(callback: CallbackQuery):
-    await callback.answer(
-        "Действие недоступно.",
-        show_alert=True
-    )
+@dp.message()
+async def other_message_handler(message: Message):
+    # Обычные сообщения самому боту не пересылаются.
+    return
 
 
 async def main():
     logging.info("✅ Бот запущен")
     logging.info("OWNER_ID: %s", OWNER_ID)
-    logging.info("Режим перехвата: Telegram Business")
-    logging.info("Фильтры: 42777, 777000")
+    logging.info("Режим: Telegram Business")
+    logging.info("Фильтрация по отправителю: отключена")
+    logging.info("Маскировка чувствительных данных: включена")
 
     await dp.start_polling(
         bot,
@@ -147,8 +115,4 @@ async def main():
 
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    finally:
-        pass
-
+    asyncio.run(main())
