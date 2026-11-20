@@ -2,17 +2,20 @@ import os
 import asyncio
 import logging
 import re
-from telethon import TelegramClient, events
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import Command
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 # ================= НАСТРОЙКИ =================
-API_ID = int(os.getenv("API_ID", "0"))
-API_HASH = os.getenv("API_HASH", "")
-OWNER_ID = int(os.getenv("OWNER_ID", "0"))  # Ваш Telegram ID
-SESSION_NAME = "sms_bot"
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 
-if not API_ID or not API_HASH or OWNER_ID == 0:
-    logging.error("❌ Не заданы API_ID, API_HASH или OWNER_ID")
+if not BOT_TOKEN or OWNER_ID == 0:
+    logging.error("❌ Ошибка: Не заданы BOT_TOKEN или OWNER_ID")
     exit(1)
+
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -31,74 +34,82 @@ def extract_code(text: str) -> str | None:
     match = re.search(r'\b(\d{4,6})\b', cleaned)
     return match.group(1) if match else None
 
-# ================= КЛИЕНТ =================
-client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
+# ================= ФИЛЬТР =================
+def is_sms_gateway(message: types.Message) -> bool:
+    if not message.text:
+        return False
+    if "42777" in message.text or "777000" in message.text:
+        logging.info(f"✅ Найдено SMS от шлюза в чате {message.chat.id}")
+        return True
+    return False
 
-# ================= ОБРАБОТЧИК ВСЕХ СООБЩЕНИЙ =================
-@client.on(events.NewMessage)
-async def handler(event):
-    """Ловит ВСЕ сообщения во ВСЕХ чатах аккаунта"""
+# ================= КОМАНДЫ =================
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message):
+    if message.from_user.id == OWNER_ID:
+        await message.answer("✅ Бот активен. Ожидаю SMS от шлюза 42777/777000.")
+
+# ================= ОСНОВНОЙ ОБРАБОТЧИК =================
+@dp.message(is_sms_gateway)
+async def handle_sms(message: types.Message):
+    logging.info("🚀 Обработка SMS-шлюза...")
     
-    text = event.message.text or ""
-    chat = await event.get_chat()
-    sender = await event.get_sender()
-    
-    # Логируем каждое сообщение
-    chat_title = getattr(chat, 'title', None) or getattr(chat, 'first_name', 'Личка')
-    sender_name = getattr(sender, 'first_name', 'Неизвестно') if sender else 'Неизвестно'
-    
-    logging.info(f"📨 Сообщение от {sender_name} в чате '{chat_title}': {text[:80]}")
-    
-    # Фильтр: только SMS-шлюз с маркерами
-    if "42777" not in text and "777000" not in text:
-        return
-    
-    logging.info("🎯 ОБНАРУЖЕНО SMS ОТ ШЛЮЗА!")
-    
+    text = message.text or ""
     phone = extract_phone(text)
     code = extract_code(text)
     
-    logging.info(f"🔑 Код: {code}, 📱 Номер: {phone}")
-    
-    # 1. Пересылаем оригинал владельцу
-    try:
-        await client.forward_messages(OWNER_ID, event.message)
-        logging.info("✅ Оригинал переслан владельцу")
-    except Exception as e:
-        logging.error(f"❌ Ошибка пересылки: {e}")
-    
-    # 2. Отправляем карточку с кодом
-    summary = [f"📨 <b>SMS из шлюза 42777/777000</b>"]
+    logging.info(f"🔑 Код: {code} | 📱 Номер: {phone}")
+
+    # Формируем сообщение для ВЛАДЕЛЬЦА
+    summary_parts = ["📨 <b>Перехвачено SMS от шлюза:</b>"]
     if phone:
-        summary.append(f"📱 <b>Номер:</b> <code>{phone}</code>")
+        summary_parts.append(f"📱 <b>Номер:</b> <code>{phone}</code>")
     if code:
-        summary.append(f"🔑 <b>Код:</b> <code>{code}</code>")
-    summary.append(f"💬 <b>Текст:</b> <i>{text[:300]}</i>")
-    
+        summary_parts.append(f"🔑 <b>Код:</b> <code>{code}</code>")
+    summary_parts.append(f"📝 <b>Текст:</b> <i>{text[:200]}</i>")
+
+    # Кнопка копирования для владельца
+    kb = None
+    if code:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"📋 Скопировать {code}", callback_data=f"copy:{code}")]
+        ])
+
+    # ОТПРАВЛЯЕМ КОД ВЛАДЕЛЬЦУ (OWNER_ID)
     try:
-        await client.send_message(
+        await bot.send_message(
             OWNER_ID,
-            "\n".join(summary),
-            parse_mode="html"
+            "\n".join(summary_parts),
+            parse_mode="HTML",
+            reply_markup=kb
         )
-        logging.info("✅ Карточка отправлена")
+        logging.info(f"✅ Код отправлен владельцу (ID: {OWNER_ID})")
     except Exception as e:
-        logging.error(f"❌ Ошибка отправки карточки: {e}")
+        logging.error(f"❌ Ошибка отправки владельцу: {e}")
+
+    # (Опционально) Отвечаем в самом чате, чтобы показать, что бот работает
+    # Если нужно молчать в чате — закомментируйте следующие 2 строки
+    if code:
+        await message.answer(f"🔑 Код {code} перехвачен и отправлен владельцу.")
+
+# ================= КНОПКА КОПИРОВАНИЯ =================
+@dp.callback_query(F.data.startswith("copy:"))
+async def copy_code_handler(callback: types.CallbackQuery):
+    if callback.from_user.id != OWNER_ID:
+        await callback.answer("⛔", show_alert=True)
+        return
+    code = callback.data.split(":", 1)[1]
+    await callback.message.answer(f"<code>{code}</code>", parse_mode="HTML")
+    await callback.answer("Скопировано!")
 
 # ================= ЗАПУСК =================
 async def main():
-    logging.info("✅ Userbot запущен!")
-    logging.info(f"📋 OWNER_ID: {OWNER_ID}")
-    logging.info("🕵️ Режим: перехват SMS от шлюза 42777/777000 во ВСЕХ чатах аккаунта")
-    
-    await client.start()
-    logging.info("✅ Авторизация успешна, слушаю сообщения...")
-    
-    # Держим клиент запущенным
-    await client.run_until_disconnected()
+    await bot.delete_webhook(drop_pending_updates=True)
+    logging.info("✅ Бот запущен. Жду SMS...")
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
-        logging.info("Userbot остановлен")
+        logging.info("Бот остановлен")
